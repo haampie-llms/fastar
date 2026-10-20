@@ -286,6 +286,18 @@ def test_no_writes_through_hardlinked_symlink(tmp_path):
     assert outside.read_text() == "original"
 
 
+@needs_symlinks
+def test_no_hardlinks_through_symlinks(tmp_path):
+    """A hardlink target behind a symlinked dir is refused, and nothing outside is linked."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_text("secret")
+    members = [("dir", "s", str(outside), 0o777), ("hard", "h", "dir/secret", 0o644)]
+    with pytest.raises(untar.Error, match="not extracted"):
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "dest"))
+    assert (outside / "secret").stat().st_nlink == 1
+
+
 @pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")
 def test_hardlinks_reuse_open_dirs(tmp_path, monkeypatch):
     """A hardlink only opens the dirs of its target that are not open already."""
