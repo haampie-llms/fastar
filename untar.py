@@ -11,7 +11,6 @@ import contextlib
 import errno
 import gzip
 import os
-import shutil
 import stat
 import struct
 import sys
@@ -461,6 +460,20 @@ def _close(d: Optional[Dir]) -> None:
         os.close(d)
 
 
+def _remove_files(d: Dir) -> List[str]:
+    """Remove the entries of d that are not dirs, as far as possible, and return its subdirs."""
+    subdirs = []
+    for name in os.listdir(d):
+        path, dir_fd = _at(d, name)
+        with contextlib.suppress(OSError):
+            s = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+            if stat.S_ISDIR(s.st_mode):
+                subdirs.append(name)
+            else:
+                os.unlink(path, dir_fd=dir_fd)
+    return subdirs
+
+
 #: Errors of creating a link where the platform or filesystem does not support it
 _UNSUPPORTED = {
     errno.EPERM,
@@ -492,7 +505,7 @@ class _Extractor:
 
     def __init__(
         self,
-        dest: str,
+        dest: Union[str, int],
         root_marker: Optional[str],
         file_mode: int,
         dir_mode: int,
@@ -513,11 +526,15 @@ class _Extractor:
         #: None where closed, which is only below the deepest _MAX_OPEN_DIRS
         self.dirs: List[Optional[Dir]] = []
 
-        dest = os.path.abspath(dest)
-        if _WINDOWS and not dest.startswith("\\\\?\\"):
-            # an extended-length path, which may exceed MAX_PATH
-            dest = "\\\\?\\" + dest
-        self.dest: Dir = os.open(dest, _DIR_FLAGS) if _DIR_FD else dest
+        if isinstance(dest, int):
+            # A copy, so that the caller's file descriptor stays open
+            self.dest: Dir = os.dup(dest)
+        else:
+            dest = os.path.abspath(dest)
+            if _WINDOWS and not dest.startswith("\\\\?\\"):
+                # an extended-length path, which may exceed MAX_PATH
+                dest = "\\\\?\\" + dest
+            self.dest = os.open(dest, _DIR_FLAGS) if _DIR_FD else dest
         while True:
             tmp_name = f".untar-{os.urandom(4).hex()}"
             path, dir_fd = _at(self.dest, tmp_name)
@@ -526,7 +543,7 @@ class _Extractor:
                 break
             except FileExistsError:
                 pass
-        self.tmp_path = os.path.join(dest, tmp_name)
+        self.tmp_name = tmp_name
         self.tmp = _open_dir(self.dest, tmp_name)
 
         # Find out once what the filesystem does to new entries: mode bits the umask or default
@@ -543,10 +560,36 @@ class _Extractor:
         self.chmod_dirs = not _WINDOWS and stat.S_IMODE(s.st_mode) != dir_mode
 
     def close(self) -> None:
-        for d in (*self.dirs, self.tmp, self.dest):
+        """Remove tmp, as far as possible, and close the open dirs."""
+        with contextlib.suppress(OSError, Error):
+            self._remove_tmp()
+        for d in (*self.dirs, self.tmp):
             _close(d)
-        # rmtree walks with dir file descriptors where supported, so depth is no problem
-        shutil.rmtree(self.tmp_path, ignore_errors=True)
+        path, dir_fd = _at(self.dest, self.tmp_name)
+        with contextlib.suppress(OSError):
+            os.rmdir(path, dir_fd=dir_fd)
+        _close(self.dest)
+
+    def _remove_tmp(self) -> None:
+        """Remove what is in tmp, depth first through the stack of open dirs, so without following
+        symlinks and with a bounded number of open dirs. Entries that cannot be removed stay."""
+        parts: List[str] = []
+        #: The subdirs that are left to remove, of tmp and of each dir in parts
+        pending = [_remove_files(self._dir(parts, create=False))]
+        while pending:
+            if pending[-1]:
+                parts.append(pending[-1].pop())
+                try:
+                    pending.append(_remove_files(self._dir(parts, create=False)))
+                except (OSError, Error):
+                    parts.pop()
+                continue
+            pending.pop()
+            if parts:
+                name = parts.pop()
+                path, dir_fd = _at(self._dir(parts, create=False), name)
+                with contextlib.suppress(OSError):
+                    os.rmdir(path, dir_fd=dir_fd)
 
     def _attrs(self, fd: Dir, mode: int, chmod: bool) -> None:
         """Set the group and mode of an open file or dir, which never follows a symlink."""
@@ -556,7 +599,7 @@ class _Extractor:
         if chmod:
             os.fchmod(fd, mode)  # type: ignore
 
-    def _dir(self, parts: List[str]) -> Dir:
+    def _dir(self, parts: List[str], create: bool = True) -> Dir:
         """Open tmp/parts, creating missing dirs, and keep its deepest ancestors open."""
         common = _common(self.names, parts)
         for d in self.dirs[common:]:
@@ -570,6 +613,8 @@ class _Extractor:
             try:
                 d = _open_dir(parent, name)
             except FileNotFoundError:
+                if not create:
+                    raise
                 path, dir_fd = _at(parent, name)
                 os.mkdir(path, self.dir_mode, dir_fd=dir_fd)
                 d = _open_dir(parent, name)
@@ -788,7 +833,7 @@ class _Extractor:
 
 def extract(
     src: Union[str, "os.PathLike[str]", IO[bytes]],
-    dest: str,
+    dest: Union[str, int],
     *,
     root_marker: Optional[str] = None,
     file_mode: int = 0o755,
@@ -796,8 +841,9 @@ def extract(
     gid: Optional[int] = None,
 ) -> str:
     """Extract the tar archive ``src``, a path or a binary file object that is read front to
-    back once, into ``dest``, which is created if it does not exist. Entries already in
-    ``dest`` are not replaced: an archive with one of the same name is an error.
+    back once, into ``dest``: a path, which is created if it does not exist, or the file
+    descriptor of an open dir, which stays open. Entries already in ``dest`` are not replaced:
+    an archive with one of the same name is an error.
 
     With ``root_marker``, only the contents of the parent of the shallowest member with that
     name are extracted, and the archive name of that parent is returned. Other members must be
@@ -812,7 +858,11 @@ def extract(
     be created, their targets are copied."""
     if gid is not None and _WINDOWS:
         raise ValueError("gid is not supported on Windows")
-    os.makedirs(dest, exist_ok=True)
+    if isinstance(dest, int):
+        if not _DIR_FD:
+            raise ValueError("dest cannot be a file descriptor on this platform")
+    else:
+        os.makedirs(dest, exist_ok=True)
     extractor = _Extractor(dest, root_marker, file_mode, dir_mode, gid)
     try:
         with _open_archive(src) as stream:
