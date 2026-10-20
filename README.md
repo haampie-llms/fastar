@@ -58,6 +58,11 @@ Checks there are path based, and so not safe against concurrent changes to the d
 
 ```console
 $ pip install -e '.[dev]'
-$ pytest
+$ python tests/vendor/fetch_cpython_testdata.py cpython-testdata
+$ FASTAR_CPYTHON_TESTDATA=cpython-testdata pytest
 $ ruff check && ruff format --diff && mypy
 ```
+
+`tests/vendor/test_cpython.py` is adapted from CPython's `test_tarfile.py`, and is under the PSF
+License Agreement included in it. It runs fastar on CPython's test archive and against the
+attacks CPython tests its extraction filters with. The rest of fastar is under the MIT license.
