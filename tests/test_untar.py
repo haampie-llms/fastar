@@ -286,6 +286,27 @@ def test_no_writes_through_hardlinked_symlink(tmp_path):
     assert outside.read_text() == "original"
 
 
+@pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")
+def test_hardlinks_reuse_open_dirs(tmp_path, monkeypatch):
+    """A hardlink only opens the dirs of its target that are not open already."""
+    opens = []
+    real_open = os.open
+    monkeypatch.setattr(
+        os, "open", lambda *a, **k: opens.append(a[0]) or real_open(*a, **k)
+    )
+    deep = "/".join("abcdefgh")
+    files = [(f"{deep}/x/f{i}", "f", b"", 0o644) for i in range(10)]
+    links = [(f"{deep}/x/h{i}", "h", f"{deep}/x/f{i}", 0o644) for i in range(10)] + [
+        (f"{deep}/y/h{i}", "h", f"{deep}/x/f{i}", 0o644) for i in range(10)
+    ]
+    untar.extract(io.BytesIO(make_tar(files)), str(tmp_path / "files"))
+    without_links = len(opens)
+    opens.clear()
+    untar.extract(io.BytesIO(make_tar(files + links)), str(tmp_path / "links"))
+    # Links in x open nothing, links in y open x, and y is opened, made and opened again
+    assert len(opens) - without_links == 10 + 2
+
+
 def test_no_overwrites(tmp_path):
     members = [("file", "f", b"first", 0o644), ("file", "f", b"second", 0o644)]
     with pytest.raises(FileExistsError):

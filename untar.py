@@ -668,23 +668,29 @@ class _Extractor:
                 f"Archive contains {member.name} of unsupported type {member.type!r}"
             )
 
-    def _open_chain(self, parts: List[str]) -> Dir:
-        """Open tmp/parts without creating anything, independently of the stack."""
-        d = os.dup(self.tmp) if isinstance(self.tmp, int) else self.tmp
-        for name in parts:
+    def _open_existing(self, parts: List[str]) -> Tuple[Dir, bool]:
+        """Open tmp/parts without creating anything, from the deepest dir on the stack that
+        contains it. Returns the dir and whether it was opened here, and must be closed."""
+        common = _common(self.names, parts)
+        d = self.dirs[common - 1] if common else self.tmp
+        owned = False
+        for name in parts[common:]:
             try:
                 child = _open_dir(d, name)
             finally:
-                _close(d)
-            d = child
-        return d
+                if owned:
+                    _close(d)
+            d, owned = child, True
+        return d, owned
 
     def _copy(self, source: List[str], dest: List[str], link: bool = False) -> bool:
         """Hardlink or copy an extracted entry to dest, and return whether it was extracted."""
         if not source:
             return False
+        # Open dest's parent first, since that may close dirs on the stack that source reuses.
+        parent = self._dir(dest[:-1])
         try:
-            source_parent = self._open_chain(source[:-1])
+            source_parent, owned = self._open_existing(source[:-1])
         except (FileNotFoundError, Error):
             return False
         try:
@@ -700,7 +706,6 @@ class _Extractor:
                     )
                 self._dir(dest)
                 return True
-            parent = self._dir(dest[:-1])
             if link:
                 dest_path, dest_fd = _at(parent, dest[-1])
                 try:
@@ -726,7 +731,8 @@ class _Extractor:
                 os.close(src)
             return True
         finally:
-            _close(source_parent)
+            if owned:
+                _close(source_parent)
 
     def finish(self) -> str:
         """Move the contents of the final root into dest, and return its archive name."""
