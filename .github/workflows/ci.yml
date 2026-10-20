@@ -24,7 +24,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e '.[dev]'
-      - run: pytest
+      - run: pytest -rs
 
   # Spack still supports Python 3.6; hatchling and hypothesis do not
   test-old:

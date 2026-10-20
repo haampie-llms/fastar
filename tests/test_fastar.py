@@ -316,6 +316,7 @@ def test_special_files(tmp_path, type):
         fastar.extract(io.BytesIO(out.getvalue()), str(tmp_path / "d"))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
 def test_special_modes_are_not_restored(tmp_path):
     data = make_tar([("suid", "f", b"x", 0o4777), ("dir", "d", None, 0o3777)])
     fastar.extract(io.BytesIO(data), str(tmp_path))
