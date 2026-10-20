@@ -1,4 +1,5 @@
 import collections
+import errno
 import gzip
 import io
 import os
@@ -456,7 +457,7 @@ def test_gid(tmp_path):
 @pytest.mark.parametrize("target_first", [False, True])
 def test_links_are_copied_where_unsupported(tmp_path, monkeypatch, target_first):
     def fail(*args, **kwargs):
-        raise OSError("links are not supported")
+        raise OSError(errno.EPERM, "links are not supported")
 
     monkeypatch.setattr(os, "symlink", fail)
     monkeypatch.setattr(os, "link", fail)

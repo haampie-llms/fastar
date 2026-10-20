@@ -42,6 +42,10 @@ and files are created with `O_EXCL | O_NOFOLLOW` so existing entries are never r
 Symlinks may point anywhere, but untar never follows them. On Windows, which has no dir file
 descriptors, these checks are path based and not safe against concurrent changes.
 
+Archives that tar implementations read differently are rejected, so that no member can hide
+from one of them: numbers must be plain digits, a member's name and size come from one header
+only, and global pax headers cannot set them. The gzip checksum is always verified.
+
 ## Development
 
 ```console

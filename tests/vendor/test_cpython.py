@@ -498,7 +498,7 @@ def test_symlink_trailing_slash(outerdir):
     arc = ArchiveMaker()
     arc.add_raw("x/", tarfile.SYMTYPE, "..")
     arc.add("x/escaped", content="hi")
-    rejected(extract(arc, outerdir), match="not a directory")
+    rejected(extract(arc, outerdir), match="named like a directory")
 
 
 @needs_symlinks
