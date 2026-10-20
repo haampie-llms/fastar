@@ -1,9 +1,10 @@
-"""Fast, streaming extraction of tar archives.
+"""Fast, safe, streaming extraction of tar archives that distribute software.
 
 Archives are read front to back exactly once, from a file or any readable binary stream, and
 only the header fields that extraction needs are parsed. ``extract`` can strip a leading
 directory that is only known from the archive's contents: the parent of the shallowest member
-with a given name. Files are created with their final permissions.
+with a given name. Owners, groups, timestamps and permissions in the archive are not restored:
+files are created with the permissions given by the caller.
 """
 
 import contextlib
@@ -387,7 +388,7 @@ class _Extractor:
             dest = "\\\\?\\" + dest
         self.dest: Dir = os.open(dest, _DIR_FLAGS) if _DIR_FD else dest
         while True:
-            tmp_name = f".fastar-{os.urandom(4).hex()}"
+            tmp_name = f".untar-{os.urandom(4).hex()}"
             path, dir_fd = _at(self.dest, tmp_name)
             try:
                 os.mkdir(path, 0o700, dir_fd=dir_fd)

@@ -1,6 +1,6 @@
 """Download CPython's test archives for test_cpython.py into the dir given as argument.
 
-Usage: python tests/vendor/fetch_cpython_testdata.py DIR, then set FASTAR_CPYTHON_TESTDATA=DIR."""
+Usage: python tests/vendor/fetch_cpython_testdata.py DIR, then set UNTAR_CPYTHON_TESTDATA=DIR."""
 
 import hashlib
 import os

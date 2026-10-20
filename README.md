@@ -1,68 +1,55 @@
-# fastar
+# untar
 
-Fast, streaming extraction of tar archives, in a single pure Python module without
-dependencies, for Python 3.6 and later.
+Fast, safe, streaming extraction of tar archives that distribute software, in a single pure
+Python module without dependencies, for Python 3.6 and later.
 
 ```python
-import fastar
+import untar
 
-# Extract the contents of the dir that contains `.spack`, wherever it is in the archive
-root = fastar.extract("pkg.tar.gz", "/opt/pkg", root_marker=".spack")
+# Extract an archive, from a path or any readable binary stream
+untar.extract("pkg.tar.gz", "/opt/pkg")
 
-# Extract from any readable binary stream, such as an HTTP response
-with urllib.request.urlopen(url) as response:
-    fastar.extract(response, "dest")
+# Extract the dir that contains `.meta`, wherever it is in the archive
+root = untar.extract("pkg.tar.gz", "/opt/pkg", root_marker=".meta")
 ```
 
-## Why
+## Scope
 
-- **One pass.** The archive is read front to back exactly once, without seeking, from a file,
-  a pipe or a network stream. Gzip compression is detected from the first bytes.
-- **Less work per member.** Only the header fields that extraction needs are parsed: ustar
-  headers, pax extended headers and GNU long names. A regular file costs an `open`, `write`s
-  and a `close`, like GNU tar.
-- **Stripping a prefix that is only known from the contents.** With `root_marker`, the
-  archive's contents are extracted relative to the parent of the shallowest member with that
-  name, like `tar --strip-components` with a count that is only known after the last member.
-  Other members must be in that dir, except for the dirs leading up to it.
-- **No path length limits.** Entries are created relative to open dir file descriptors, so
-  no path longer than a single name is passed to the operating system, however long the
-  archive's names and the destination are.
-- **Final permissions on creation.** Files get `file_mode` (without executable bits where the
-  member has none for its owner) and dirs `dir_mode`, optionally with a group `gid`, so that
-  no pass over the extracted tree is needed afterwards. Timestamps and ownership in the archive
-  are not restored.
+untar is for installing software from archives, not for restoring backups. Owners, groups,
+timestamps and permissions recorded in an archive describe the machine it was made on; on
+another machine they are meaningless at best and a liability at worst. So untar does not
+restore them: files are created with `file_mode` (without executable bits where the archive
+has none for the owner), dirs with `dir_mode`, optionally with group `gid`, and only regular
+files, dirs, symlinks and hardlinks are extracted.
+
+## Features
+
+- **One pass.** The archive is read front to back once, without seeking, from a file, pipe or
+  network stream. Gzip is detected from the first bytes.
+- **Less work per member.** Only the header fields that extraction needs are parsed (ustar,
+  pax and GNU long names), and a file costs an `open`, `write`s and a `close`.
+- **A root only known from the contents.** With `root_marker`, the parent of the shallowest
+  member with that name is extracted, like `tar --strip-components` with a count that is only
+  known after the last member.
+- **No path length limits.** Entries are created relative to open dir file descriptors, so no
+  path longer than one name is passed to the operating system.
 
 ## Safety
 
-fastar writes nothing outside the destination, whatever the archive contains:
-
-- Absolute names and names with `..` are rejected.
-- Dirs are opened with `O_NOFOLLOW` relative to their parent's file descriptor, so nothing is
-  written through a symlink, including one swapped in concurrently.
-- Files are created with `O_EXCL | O_NOFOLLOW`, so existing entries are never written into or
-  replaced, also not through hardlinks.
-- Modes and groups are set on open file descriptors, so never on a symlink's target.
-- Device files, fifos and sparse files are rejected, and set-user-ID, set-group-ID and sticky
-  bits from the archive are not restored.
-- Pax and GNU long name headers are limited to 1 MiB.
-
-Symlinks may point anywhere: creating one writes nothing outside, and fastar never follows them.
-Where symlinks or hardlinks cannot be created, their targets are copied, also when the target
-comes later in the archive.
-
-On Windows, which has no dir file descriptors, entries are created by extended-length path.
-Checks there are path based, and so not safe against concurrent changes to the destination.
+Nothing is written outside the destination, whatever the archive contains. Absolute names and
+`..` are rejected, dirs are opened with `O_NOFOLLOW` so nothing is written through a symlink,
+and files are created with `O_EXCL | O_NOFOLLOW` so existing entries are never replaced.
+Symlinks may point anywhere, but untar never follows them. On Windows, which has no dir file
+descriptors, these checks are path based and not safe against concurrent changes.
 
 ## Development
 
 ```console
 $ pip install -e '.[dev]'
 $ python tests/vendor/fetch_cpython_testdata.py cpython-testdata
-$ FASTAR_CPYTHON_TESTDATA=cpython-testdata pytest
+$ UNTAR_CPYTHON_TESTDATA=cpython-testdata pytest
 $ ruff check && ruff format --diff && mypy
 ```
 
-`tests/vendor/test_cpython.py` is adapted from CPython's `test_tarfile.py`, and is under the PSF
-License Agreement included in it. It runs fastar on CPython's test archive and against the
-attacks CPython tests its extraction filters with. The rest of fastar is under the MIT license.
+`tests/vendor/test_cpython.py` is adapted from CPython's `test_tarfile.py` and is under the PSF
+License Agreement included in it. The rest of untar is under the MIT license.

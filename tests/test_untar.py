@@ -11,7 +11,7 @@ import tarfile
 
 import pytest
 
-import fastar
+import untar
 
 FORMATS = [tarfile.USTAR_FORMAT, tarfile.GNU_FORMAT, tarfile.PAX_FORMAT]
 needs_symlinks = pytest.mark.skipif(sys.platform == "win32", reason="needs symlinks")
@@ -97,7 +97,7 @@ def test_same_tree_as_tarfile(tmp_path, format, compress):
     )
     data = make_tar(members, format, compress)
     tarfile_extract(data, tmp_path / "expected")
-    assert fastar.extract(io.BytesIO(data), str(tmp_path / "actual")) == ""
+    assert untar.extract(io.BytesIO(data), str(tmp_path / "actual")) == ""
     assert snapshot(tmp_path / "actual") == snapshot(tmp_path / "expected")
 
 
@@ -130,12 +130,12 @@ def test_archives_from_tar(tmp_path, format):
         pytest.skip(f"tar cannot write {format}: {result.stderr.decode()}")
     data = archive.read_bytes()
     tarfile_extract(data, tmp_path / "expected")
-    fastar.extract(str(archive), str(tmp_path / "actual"))
+    untar.extract(str(archive), str(tmp_path / "actual"))
     assert snapshot(tmp_path / "actual") == snapshot(tmp_path / "expected")
 
 
-def spack_like(prefix, top_files=False, bundle=False, parents=True):
-    """Members in the order Spack creates build cache tarballs."""
+def package_like(prefix, top_files=False, bundle=False, parents=True):
+    """Members of a package archive: the parents of its prefix, then depth-first with files before dirs, and a manifest last."""
     parts = prefix.split("/")
     members = (
         [("/".join(parts[:i]), "d", None, 0o755) for i in range(1, len(parts))]
@@ -146,8 +146,8 @@ def spack_like(prefix, top_files=False, bundle=False, parents=True):
     if top_files:
         members.append((f"{prefix}/README", "f", b"readme", 0o644))
     members += [
-        (f"{prefix}/.spack", "d", None, 0o755),
-        (f"{prefix}/.spack/spec.json", "f", b"{}", 0o644),
+        (f"{prefix}/.meta", "d", None, 0o755),
+        (f"{prefix}/.meta/spec.json", "f", b"{}", 0o644),
     ]
     if not bundle:
         members += [
@@ -156,7 +156,7 @@ def spack_like(prefix, top_files=False, bundle=False, parents=True):
             (f"{prefix}/lib", "d", None, 0o755),
             (f"{prefix}/lib/libfoo.so", "f", b"foo", 0o644),
         ]
-    members.append((f"{prefix}/.spack/binary_distribution", "f", b"{}", 0o644))
+    members.append((f"{prefix}/.meta/manifest", "f", b"{}", 0o644))
     return members
 
 
@@ -170,18 +170,16 @@ def deep(base: str, length: int) -> str:
 @pytest.mark.parametrize("bundle", [False, True])
 @pytest.mark.parametrize("parents", [False, True])
 def test_root_marker(tmp_path, top_files, bundle, parents):
-    prefix = "opt/spack/linux/pkg-1.0-abcdef"
-    data = make_tar(spack_like(prefix, top_files, bundle, parents))
-    assert (
-        fastar.extract(io.BytesIO(data), str(tmp_path), root_marker=".spack") == prefix
-    )
+    prefix = "opt/store/linux/pkg-1.0-abcdef"
+    data = make_tar(package_like(prefix, top_files, bundle, parents))
+    assert untar.extract(io.BytesIO(data), str(tmp_path), root_marker=".meta") == prefix
     expected = (
-        {".spack"}
+        {".meta"}
         | ({"README"} if top_files else set())
         | (set() if bundle else {"bin", "lib"})
     )
     assert set(os.listdir(tmp_path)) == expected
-    assert (tmp_path / ".spack" / "binary_distribution").read_bytes() == b"{}"
+    assert (tmp_path / ".meta" / "manifest").read_bytes() == b"{}"
 
 
 def test_root_marker_long_paths(tmp_path):
@@ -192,9 +190,9 @@ def test_root_marker_long_paths(tmp_path):
     prefix = deep("opt", int(path_max * 0.9)) + "/pkg"
     dest = deep(str(tmp_path), int(path_max * 0.7))
     os.makedirs(dest)
-    data = make_tar(spack_like(prefix), compress=True)
-    assert fastar.extract(io.BytesIO(data), dest, root_marker=".spack") == prefix
-    assert sorted(os.listdir(dest)) == [".spack", "bin", "lib"]
+    data = make_tar(package_like(prefix), compress=True)
+    assert untar.extract(io.BytesIO(data), dest, root_marker=".meta") == prefix
+    assert sorted(os.listdir(dest)) == [".meta", "bin", "lib"]
 
 
 def test_root_marker_shallowest(tmp_path):
@@ -202,50 +200,46 @@ def test_root_marker_shallowest(tmp_path):
     members = [
         ("a", "d", None, 0o755),
         ("a/+early", "d", None, 0o755),
-        ("a/+early/.spack", "d", None, 0o755),
-        ("a/.spack", "d", None, 0o755),
-        ("a/.spack/x", "f", b"x", 0o644),
+        ("a/+early/.meta", "d", None, 0o755),
+        ("a/.meta", "d", None, 0o755),
+        ("a/.meta/x", "f", b"x", 0o644),
     ]
     assert (
-        fastar.extract(
-            io.BytesIO(make_tar(members)), str(tmp_path), root_marker=".spack"
-        )
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path), root_marker=".meta")
         == "a"
     )
-    assert sorted(os.listdir(tmp_path)) == ["+early", ".spack"]
-    assert os.listdir(tmp_path / "+early") == [".spack"]
+    assert sorted(os.listdir(tmp_path)) == ["+early", ".meta"]
+    assert os.listdir(tmp_path / "+early") == [".meta"]
 
 
 @pytest.mark.parametrize(
     "members,error",
     [
-        ([("a/.spack", "d", None, 0o755), ("b/file", "f", b"", 0o644)], "outside of a"),
-        ([("a/file", "f", b"", 0o644)], "no member named .spack"),
-        ([("a/.spack", "d", None, 0o755), ("a", "f", b"", 0o644)], "non-directory"),
+        ([("a/.meta", "d", None, 0o755), ("b/file", "f", b"", 0o644)], "outside of a"),
+        ([("a/file", "f", b"", 0o644)], "no member named .meta"),
+        ([("a/.meta", "d", None, 0o755), ("a", "f", b"", 0o644)], "non-directory"),
     ],
 )
 def test_root_marker_invalid(tmp_path, members, error):
-    with pytest.raises(fastar.Error, match=error):
-        fastar.extract(
-            io.BytesIO(make_tar(members)), str(tmp_path), root_marker=".spack"
-        )
+    with pytest.raises(untar.Error, match=error):
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path), root_marker=".meta")
     assert os.listdir(tmp_path) == []
 
 
 def test_member_order_does_not_matter(tmp_path):
-    members = spack_like("opt/spack/pkg", top_files=True)
+    members = package_like("opt/store/pkg", top_files=True)
     for seed in range(50):
         rng = random.Random(seed)
         shuffled = members[:]
         rng.shuffle(shuffled)
         dest = tmp_path / str(seed)
         assert (
-            fastar.extract(
-                io.BytesIO(make_tar(shuffled)), str(dest), root_marker=".spack"
+            untar.extract(
+                io.BytesIO(make_tar(shuffled)), str(dest), root_marker=".meta"
             )
-            == "opt/spack/pkg"
+            == "opt/store/pkg"
         )
-        assert sorted(os.listdir(dest)) == [".spack", "README", "bin", "lib"]
+        assert sorted(os.listdir(dest)) == [".meta", "README", "bin", "lib"]
 
 
 # Security
@@ -256,8 +250,8 @@ def test_member_order_does_not_matter(tmp_path):
 )
 def test_unsafe_names(tmp_path, name):
     dest = tmp_path / "dest"
-    with pytest.raises(fastar.Error, match="unsafe path"):
-        fastar.extract(io.BytesIO(make_tar([(name, "f", b"x", 0o644)])), str(dest))
+    with pytest.raises(untar.Error, match="unsafe path"):
+        untar.extract(io.BytesIO(make_tar([(name, "f", b"x", 0o644)])), str(dest))
     assert os.listdir(tmp_path) == ["dest"] and os.listdir(dest) == []
 
 
@@ -271,8 +265,8 @@ def test_no_writes_through_symlinks(tmp_path, target):
         ("link", "s", target, 0o777),
         ("link/file", "f", b"x", 0o644),
     ]
-    with pytest.raises(fastar.Error, match="not a directory"):
-        fastar.extract(io.BytesIO(make_tar(members)), str(dest))
+    with pytest.raises(untar.Error, match="not a directory"):
+        untar.extract(io.BytesIO(make_tar(members)), str(dest))
     assert os.listdir(tmp_path) == ["dest"] and os.listdir(dest) == []
 
 
@@ -287,20 +281,20 @@ def test_no_writes_through_hardlinked_symlink(tmp_path):
         ("hard", "f", b"overwritten", 0o644),
     ]
     with pytest.raises(FileExistsError):
-        fastar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "dest"))
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "dest"))
     assert outside.read_text() == "original"
 
 
 def test_no_overwrites(tmp_path):
     members = [("file", "f", b"first", 0o644), ("file", "f", b"second", 0o644)]
     with pytest.raises(FileExistsError):
-        fastar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "dest"))
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "dest"))
 
 
 @pytest.mark.parametrize("linkname", ["/etc/passwd", "../outside"])
 def test_unsafe_hardlinks(tmp_path, linkname):
-    with pytest.raises(fastar.Error, match="unsafe path"):
-        fastar.extract(
+    with pytest.raises(untar.Error, match="unsafe path"):
+        untar.extract(
             io.BytesIO(make_tar([("hard", "h", linkname, 0o644)])), str(tmp_path / "d")
         )
 
@@ -312,35 +306,35 @@ def test_special_files(tmp_path, type):
         info = tarfile.TarInfo("dev")
         info.type = type
         tar.addfile(info)
-    with pytest.raises(fastar.Error, match="unsupported type"):
-        fastar.extract(io.BytesIO(out.getvalue()), str(tmp_path / "d"))
+    with pytest.raises(untar.Error, match="unsupported type"):
+        untar.extract(io.BytesIO(out.getvalue()), str(tmp_path / "d"))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
 def test_special_modes_are_not_restored(tmp_path):
     data = make_tar([("suid", "f", b"x", 0o4777), ("dir", "d", None, 0o3777)])
-    fastar.extract(io.BytesIO(data), str(tmp_path))
+    untar.extract(io.BytesIO(data), str(tmp_path))
     assert stat.S_IMODE(os.stat(tmp_path / "suid").st_mode) == 0o755
     assert stat.S_IMODE(os.stat(tmp_path / "dir").st_mode) == 0o755
 
 
 def test_large_extended_header(tmp_path):
     data = make_tar([("x" * (2 * 1024 * 1024), "f", b"", 0o644)], tarfile.GNU_FORMAT)
-    with pytest.raises(fastar.Error, match="extended header"):
-        fastar.extract(io.BytesIO(data), str(tmp_path))
+    with pytest.raises(untar.Error, match="extended header"):
+        untar.extract(io.BytesIO(data), str(tmp_path))
 
 
 def test_invalid_checksum(tmp_path):
     data = bytearray(make_tar([("file", "f", b"x", 0o644)], tarfile.USTAR_FORMAT))
     data[0] ^= 1
-    with pytest.raises(fastar.Error, match="checksum"):
-        fastar.extract(io.BytesIO(bytes(data)), str(tmp_path))
+    with pytest.raises(untar.Error, match="checksum"):
+        untar.extract(io.BytesIO(bytes(data)), str(tmp_path))
 
 
 def test_truncated(tmp_path):
     data = make_tar([("file", "f", os.urandom(5000), 0o644)])
-    with pytest.raises(fastar.Error, match="truncated"):
-        fastar.extract(io.BytesIO(data[:2000]), str(tmp_path))
+    with pytest.raises(untar.Error, match="truncated"):
+        untar.extract(io.BytesIO(data[:2000]), str(tmp_path))
 
 
 @needs_symlinks
@@ -355,12 +349,12 @@ def test_fuzz(tmp_path):
             corrupt[rng.randrange(len(corrupt))] = rng.randrange(256)
         dest = tmp_path / "work" / str(i)
         try:
-            fastar.extract(io.BytesIO(bytes(corrupt)), str(dest))
+            untar.extract(io.BytesIO(bytes(corrupt)), str(dest))
             outcomes["ok"] += 1
-        except (fastar.Error, OSError, UnicodeError) as e:
+        except (untar.Error, OSError, UnicodeError) as e:
             outcomes[type(e).__name__] += 1
         assert os.listdir(tmp_path) == ["work"]
-        assert all(not name.startswith(".fastar-") for name in os.listdir(dest))
+        assert all(not name.startswith(".untar-") for name in os.listdir(dest))
     assert outcomes["Error"] > 0
 
 
@@ -382,7 +376,7 @@ class ReadOnly:
 @pytest.mark.parametrize("compress", [False, True])
 def test_unseekable_stream_with_short_reads(tmp_path, compress):
     data = make_tar(SAMPLE, compress=compress)
-    fastar.extract(ReadOnly(data), str(tmp_path / "actual"))
+    untar.extract(ReadOnly(data), str(tmp_path / "actual"))
     tarfile_extract(make_tar(SAMPLE), tmp_path / "expected")
     assert snapshot(tmp_path / "actual") == snapshot(tmp_path / "expected")
 
@@ -394,7 +388,7 @@ def test_decompresses_once(tmp_path, monkeypatch):
     monkeypatch.setattr(gzip._GzipReader, "_rewind", rewind)
     path = tmp_path / "a.tar.gz"
     path.write_bytes(make_tar(SAMPLE[:7], compress=True))
-    fastar.extract(str(path), str(tmp_path / "dest"))
+    untar.extract(str(path), str(tmp_path / "dest"))
 
 
 def test_reader():
@@ -405,7 +399,7 @@ def test_reader():
             ("a/g", "f", b"skipped", 0o644),
         ]
     )
-    reader = fastar.TarReader(io.BytesIO(data))
+    reader = untar.TarReader(io.BytesIO(data))
     members = []
     for member in reader:
         members.append((member.name, member.isdir(), member.isreg()))
@@ -425,7 +419,7 @@ def test_reader():
 def test_modes(tmp_path, umask, file_mode, dir_mode):
     old = os.umask(umask)
     try:
-        fastar.extract(
+        untar.extract(
             io.BytesIO(make_tar(SAMPLE)),
             str(tmp_path),
             file_mode=file_mode,
@@ -450,9 +444,7 @@ def test_modes(tmp_path, umask, file_mode, dir_mode):
 )
 def test_gid(tmp_path):
     gid = next(g for g in os.getgroups() if g != os.getegid())
-    fastar.extract(
-        io.BytesIO(make_tar(SAMPLE)), str(tmp_path), gid=gid, dir_mode=0o2755
-    )
+    untar.extract(io.BytesIO(make_tar(SAMPLE)), str(tmp_path), gid=gid, dir_mode=0o2755)
     for dirpath, dirnames, filenames in os.walk(tmp_path / "pkg"):
         for name in dirnames + filenames:
             assert os.lstat(os.path.join(dirpath, name)).st_gid == gid, name
@@ -477,7 +469,7 @@ def test_links_are_copied_where_unsupported(tmp_path, monkeypatch, target_first)
         target + links if target_first else links + target
     )
     members.append(("lib/libfoo.a", "h", "lib/libfoo.so.1", 0o644))
-    fastar.extract(io.BytesIO(make_tar(members)), str(tmp_path))
+    untar.extract(io.BytesIO(make_tar(members)), str(tmp_path))
     for name in ("libfoo.so", "libfoo.so.1", "libfoo.a"):
         path = tmp_path / "lib" / name
         assert not path.is_symlink() and path.read_bytes() == b"foo"
@@ -490,7 +482,7 @@ def test_solaris_extended_header(tmp_path):
     assert data[156:157] == tarfile.XHDTYPE
     data[156:157] = b"X"
     data[148:156] = b"%06o\0 " % (sum(data[:148]) + sum(data[156:512]) + 256)
-    fastar.extract(io.BytesIO(bytes(data)), str(tmp_path))
+    untar.extract(io.BytesIO(bytes(data)), str(tmp_path))
     assert (tmp_path / ("x" * 120)).read_bytes() == b"long"
 
 
@@ -504,5 +496,5 @@ def test_solaris_extended_header(tmp_path):
     ],
 )
 def test_no_entries_over_others(tmp_path, members):
-    with pytest.raises((FileExistsError, fastar.Error)):
-        fastar.extract(io.BytesIO(make_tar(members)), str(tmp_path))
+    with pytest.raises((FileExistsError, untar.Error)):
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path))

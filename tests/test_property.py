@@ -5,14 +5,14 @@ import os
 import tarfile
 
 import pytest
-from test_fastar import make_tar, needs_symlinks, snapshot, tarfile_extract
+from test_untar import make_tar, needs_symlinks, snapshot, tarfile_extract
 
-import fastar
+import untar
 
 hypothesis = pytest.importorskip("hypothesis")
 st = hypothesis.strategies
 
-names = st.sampled_from(["a", "b", "lib", ".spack", "x" * 120, "ü", "-x"])
+names = st.sampled_from(["a", "b", "lib", ".meta", "x" * 120, "ü", "-x"])
 
 
 @st.composite
@@ -65,7 +65,7 @@ def archives(draw):
 
 @needs_symlinks
 @hypothesis.settings(
-    max_examples=int(os.environ.get("FASTAR_EXAMPLES", "300")),
+    max_examples=int(os.environ.get("UNTAR_EXAMPLES", "300")),
     deadline=None,
     suppress_health_check=list(hypothesis.HealthCheck),
 )
@@ -75,5 +75,5 @@ def test_property_same_tree_as_tarfile(tmp_path_factory, archive):
     tmp = tmp_path_factory.mktemp("p")
     data = make_tar(members, format)
     tarfile_extract(data, tmp / "expected")
-    fastar.extract(io.BytesIO(data), str(tmp / "actual"))
+    untar.extract(io.BytesIO(data), str(tmp / "actual"))
     assert snapshot(tmp / "actual") == snapshot(tmp / "expected")

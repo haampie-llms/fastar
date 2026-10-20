@@ -1,6 +1,6 @@
 [project]
-name = "fastar"
-description = "Fast, streaming extraction of tar archives"
+name = "untar"
+description = "Fast, safe, streaming extraction of tar archives that distribute software"
 readme = "README.md"
 requires-python = ">=3.6"
 license = "MIT"
@@ -16,8 +16,8 @@ dependencies = []
 dynamic = ["version"]
 
 [project.urls]
-Homepage = "https://github.com/haampie-llms/fastar"
-Repository = "https://github.com/haampie-llms/fastar"
+Homepage = "https://github.com/haampie/untar"
+Repository = "https://github.com/haampie/untar"
 
 [project.optional-dependencies]
 dev = ["pytest", "hypothesis", "ruff", "mypy"]
@@ -27,13 +27,17 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
-path = "fastar.py"
+path = "untar.py"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["fastar.py"]
+only-include = ["untar.py"]
+
+# The tests adapted from CPython are under the PSF license; keep distributions MIT only
+[tool.hatch.build.targets.sdist]
+exclude = ["tests/vendor"]
 
 [tool.mypy]
-files = ["fastar.py"]
+files = ["untar.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

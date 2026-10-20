@@ -5,11 +5,11 @@
 # Copyright (c) 2001 Python Software Foundation; All Rights Reserved
 #
 # Summary of changes: the read tests (UstarReadTest, MemberReadTest, LongnameTest, GNUReadTest,
-# PaxReadTest, StreamReadTest, DetectReadTest) are recast as comparisons of fastar's reader with
+# PaxReadTest, StreamReadTest, DetectReadTest) are recast as comparisons of untar's reader with
 # tarfile on CPython's testtar.tar, which is not included and is read from
-# FASTAR_CPYTHON_TESTDATA. The attacks of TestExtractionFilters keep their archives, built by
-# a port of its ArchiveMaker, but check fastar's guarantee instead of tarfile's filters:
-# nothing outside the destination is created, changed or read, whether fastar extracts the
+# UNTAR_CPYTHON_TESTDATA. The attacks of TestExtractionFilters keep their archives, built by
+# a port of its ArchiveMaker, but check untar's guarantee instead of tarfile's filters:
+# nothing outside the destination is created, changed or read, whether untar extracts the
 # archive or refuses it. Tests are written for pytest.
 #
 # PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2
@@ -73,12 +73,10 @@ import tarfile
 
 import pytest
 
-import fastar
+import untar
 
-TESTDATA = os.environ.get("FASTAR_CPYTHON_TESTDATA")
-needs_testdata = pytest.mark.skipif(
-    not TESTDATA, reason="needs FASTAR_CPYTHON_TESTDATA"
-)
+TESTDATA = os.environ.get("UNTAR_CPYTHON_TESTDATA")
+needs_testdata = pytest.mark.skipif(not TESTDATA, reason="needs UNTAR_CPYTHON_TESTDATA")
 needs_symlinks = pytest.mark.skipif(sys.platform == "win32", reason="needs symlinks")
 
 
@@ -111,7 +109,7 @@ def snapshot(root):
 sha256_regtype = "e09e4bc8b3c9d9177e77256353b36c159f5f040531bbd4b024a8f9b9196c71ce"
 sha256_sparse = "4f05a776071146756345ceee937b33fc5644f5a96b9780d1c7d6a32cdf164d7b"
 
-#: fastar extracts only regular files, dirs and links, and rejects sparse files
+#: untar extracts only regular files, dirs and links, and rejects sparse files
 UNSUPPORTED = (
     tarfile.CHRTYPE,
     tarfile.BLKTYPE,
@@ -179,7 +177,7 @@ def test_members_like_tarfile():
                     content,
                 )
             )
-    reader = fastar.TarReader(io.BytesIO(data))
+    reader = untar.TarReader(io.BytesIO(data))
     actual = []
     for m in reader:
         content = b"".join(reader.chunks()) if m.isreg() else None
@@ -204,7 +202,7 @@ def test_members_like_tarfile():
 @needs_testdata
 def test_checksums():
     """MemberReadTest: the data of regular files, including old v7 and signed checksums."""
-    reader = fastar.TarReader(io.BytesIO(without_unsupported(read_testtar())))
+    reader = untar.TarReader(io.BytesIO(without_unsupported(read_testtar())))
     sums = {}
     for m in reader:
         if m.isreg():
@@ -235,10 +233,10 @@ def test_unsupported_members():
     for member, raw in raw_members(read_testtar()):
         if supported(member):
             continue
-        with pytest.raises(fastar.Error):
-            for m in fastar.TarReader(io.BytesIO(raw + bytes(1024))):
+        with pytest.raises(untar.Error):
+            for m in untar.TarReader(io.BytesIO(raw + bytes(1024))):
                 if m.type in UNSUPPORTED:
-                    raise fastar.Error(f"unsupported {m.type!r}")
+                    raise untar.Error(f"unsupported {m.type!r}")
         rejected.append(member.name)
     assert rejected == [
         "ustar/blktype",
@@ -256,7 +254,7 @@ def test_ustar_sparse_is_a_regular_file():
     """ustar/sparse is not sparse in the archive, and is read in full."""
     for member, raw in raw_members(read_testtar()):
         if member.name == "ustar/sparse":
-            reader = fastar.TarReader(io.BytesIO(raw + bytes(1024)))
+            reader = untar.TarReader(io.BytesIO(raw + bytes(1024)))
             (m,) = [m for m in reader if m.isreg() and b"".join(reader.chunks())]
             assert m.size == 86016
 
@@ -268,7 +266,7 @@ def test_extract_like_tarfile(tmp_path):
     with tarfile.open(fileobj=io.BytesIO(data)) as tar:
         tar.extraction_filter = lambda member, path: member
         tar.extractall(tmp_path / "expected")
-    fastar.extract(io.BytesIO(data), str(tmp_path / "actual"))
+    untar.extract(io.BytesIO(data), str(tmp_path / "actual"))
     assert snapshot(tmp_path / "actual") == snapshot(tmp_path / "expected")
 
 
@@ -276,8 +274,8 @@ def test_extract_like_tarfile(tmp_path):
 @pytest.mark.parametrize("name", ["testtar.tar.xz", "recursion.tar"])
 def test_unsupported_archives(name):
     """DetectReadTest: compressions other than gzip are not detected; recursion.tar is invalid."""
-    with pytest.raises(fastar.Error):
-        fastar.extract(os.path.join(TESTDATA, name), "unused")
+    with pytest.raises(untar.Error):
+        untar.extract(os.path.join(TESTDATA, name), "unused")
 
 
 @needs_testdata
@@ -294,9 +292,9 @@ def test_gzip_and_stream(tmp_path):
         def read(self, size=-1):
             return self.f.read(min(size, 511) if size >= 0 else 511)
 
-    names = [m.name for m in fastar.TarReader(io.BytesIO(data))]
-    assert [m.name for m in fastar.TarReader(Stream(data))] == names
-    fastar.extract(Stream(gzip.compress(data)), str(tmp_path))
+    names = [m.name for m in untar.TarReader(io.BytesIO(data))]
+    assert [m.name for m in untar.TarReader(Stream(data))] == names
+    untar.extract(Stream(gzip.compress(data)), str(tmp_path))
 
 
 # The attacks of TestExtractionFilters
@@ -366,20 +364,20 @@ def extract(arc, outerdir):
     dest = outerdir / "dest"
     error = None
     try:
-        fastar.extract(io.BytesIO(arc.data()), str(dest))
-    except (fastar.Error, OSError) as e:
+        untar.extract(io.BytesIO(arc.data()), str(dest))
+    except (untar.Error, OSError) as e:
         error = e
     after_names = sorted(p.name for p in outerdir.iterdir())
     assert after_names == sorted(set(before[0]) | {"dest"}), "created outside dest"
     assert flag.read_text() == "capture me"
     assert flag.stat().st_mode == before[1] and os.stat(outerdir).st_mode == before[2]
-    assert not any(n.startswith(".fastar-") for n in os.listdir(dest)), (
+    assert not any(n.startswith(".untar-") for n in os.listdir(dest)), (
         "temporary dir left"
     )
     return error
 
 
-def rejected(error, kind=fastar.Error, match=""):
+def rejected(error, kind=untar.Error, match=""):
     assert isinstance(error, kind), error
     assert match in str(error)
 
@@ -401,7 +399,7 @@ def test_absolute(outerdir):
 
 @needs_symlinks
 def test_parent_dir_out_and_back(outerdir):
-    """The data filter extracts this to sub/file; fastar rejects any '..'."""
+    """The data filter extracts this to sub/file; untar rejects any '..'."""
     arc = ArchiveMaker()
     arc.add("../escaped.evil/../dest/sub/file", content="content")
     rejected(extract(arc, outerdir), match="unsafe path")
@@ -609,7 +607,7 @@ def test_chmod_outside_dir(outerdir):
 @needs_symlinks
 @pytest.mark.parametrize("link_type", [tarfile.SYMTYPE, tarfile.LNKTYPE])
 def test_links_get_no_owner(outerdir, link_type):
-    """test_chown_links_on_extract: fastar does not restore owners, of links or otherwise."""
+    """test_chown_links_on_extract: untar does not restore owners, of links or otherwise."""
     arc = ArchiveMaker()
     arc.add("test.txt", content="x", mode=0o755)
     arc.add_raw("link", link_type, "test.txt")

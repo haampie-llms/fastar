@@ -27,10 +27,26 @@ jobs:
       - run: python tests/vendor/fetch_cpython_testdata.py cpython-testdata
       - run: pytest -rs
         env:
-          FASTAR_CPYTHON_TESTDATA: cpython-testdata
+          UNTAR_CPYTHON_TESTDATA: cpython-testdata
 
-  # Spack still supports Python 3.6; hatchling and hypothesis do not
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.14"
+      - run: pip install build
+      - run: python -m build --wheel
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: wheel
+          path: dist/
+
+  # Spack still supports Python 3.6, for which hatchling and hypothesis are too new: test the
+  # wheel built above, which also checks that old pip installs it.
   test-old:
+    needs: wheel
     strategy:
       fail-fast: false
       matrix:
@@ -39,11 +55,15 @@ jobs:
     container: python:${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - run: pip install pytest
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: wheel
+          path: dist/
+      - run: pip install pytest dist/*.whl
       - run: python tests/vendor/fetch_cpython_testdata.py cpython-testdata
-      - run: PYTHONPATH=. pytest -rs
+      - run: rm untar.py && pytest -rs
         env:
-          FASTAR_CPYTHON_TESTDATA: cpython-testdata
+          UNTAR_CPYTHON_TESTDATA: cpython-testdata
 
   lint:
     runs-on: ubuntu-latest
