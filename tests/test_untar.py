@@ -417,6 +417,21 @@ def test_deep_tmp_is_removed_in_linear_time(tmp_path, monkeypatch):
     assert fds.opens < 2 * depth + 10
 
 
+@pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")
+def test_dest_dir_fd(tmp_path):
+    """dest can be an open dir, which is extracted into wherever it moved, and stays open."""
+    (tmp_path / "a").mkdir()
+    fd = os.open(str(tmp_path / "a"), os.O_RDONLY)
+    try:
+        (tmp_path / "a").rename(tmp_path / "b")
+        untar.extract(io.BytesIO(make_tar(SAMPLE)), fd)
+        os.fstat(fd)
+    finally:
+        os.close(fd)
+    tarfile_extract(make_tar(SAMPLE), tmp_path / "expected")
+    assert snapshot(tmp_path / "b") == snapshot(tmp_path / "expected")
+
+
 def test_no_overwrites(tmp_path):
     members = [("file", "f", b"first", 0o644), ("file", "f", b"second", 0o644)]
     with pytest.raises(FileExistsError):
