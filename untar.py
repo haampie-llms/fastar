@@ -515,7 +515,7 @@ class _Extractor:
 
     def __init__(
         self,
-        dest: str,
+        dest: Union[str, int],
         root_marker: Optional[str],
         file_mode: int,
         dir_mode: int,
@@ -536,11 +536,18 @@ class _Extractor:
         #: The deepest of those dirs, at most _MAX_OPEN_DIRS, which are open
         self.dirs: List[Dir] = []
 
-        dest = os.path.abspath(dest)
-        if _WINDOWS and not dest.startswith("\\\\?\\"):
-            # an extended-length path, which may exceed MAX_PATH
-            dest = "\\\\?\\" + dest
-        self.dest: Dir = os.open(dest, _DIR_FLAGS) if _DIR_FD else dest
+        if isinstance(dest, int):
+            if not _DIR_FD:
+                raise ValueError("dest cannot be a file descriptor on this platform")
+            # A copy, so that the caller's file descriptor stays open
+            self.dest: Dir = os.dup(dest)
+        else:
+            os.makedirs(dest, exist_ok=True)
+            dest = os.path.abspath(dest)
+            if _WINDOWS and not dest.startswith("\\\\?\\"):
+                # an extended-length path, which may exceed MAX_PATH
+                dest = "\\\\?\\" + dest
+            self.dest = os.open(dest, _DIR_FLAGS) if _DIR_FD else dest
         while True:
             tmp_name = f".untar-{os.urandom(4).hex()}"
             path, dir_fd = _at(self.dest, tmp_name)
@@ -846,7 +853,7 @@ class _Extractor:
 
 def extract(
     src: Union[str, "os.PathLike[str]", IO[bytes]],
-    dest: str,
+    dest: Union[str, int],
     *,
     root_marker: Optional[str] = None,
     file_mode: int = 0o755,
@@ -854,8 +861,9 @@ def extract(
     gid: Optional[int] = None,
 ) -> str:
     """Extract the tar archive ``src``, a path or a binary file object that is read front to
-    back once, into ``dest``, which is created if it does not exist. Entries already in
-    ``dest`` are not replaced: an archive with one of the same name is an error.
+    back once, into ``dest``: a path, which is created if it does not exist, or the file
+    descriptor of an open dir, which stays open. Entries already in ``dest`` are not replaced:
+    an archive with one of the same name is an error.
 
     With ``root_marker``, only the contents of the parent of the shallowest member with that
     name are extracted, and the archive name of that parent is returned. Other members must be
@@ -870,7 +878,6 @@ def extract(
     be created, their targets are copied."""
     if gid is not None and _WINDOWS:
         raise ValueError("gid is not supported on Windows")
-    os.makedirs(dest, exist_ok=True)
     extractor = _Extractor(dest, root_marker, file_mode, dir_mode, gid)
     try:
         with _open_archive(src) as stream:
