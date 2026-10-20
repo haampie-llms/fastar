@@ -298,32 +298,12 @@ def test_no_hardlinks_through_symlinks(tmp_path):
     assert (outside / "secret").stat().st_nlink == 1
 
 
-@pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")
-def test_hardlinks_reuse_open_dirs(tmp_path, monkeypatch):
-    """A hardlink only opens the dirs of its target that are not open already."""
-    opens = []
-    real_open = os.open
-    monkeypatch.setattr(
-        os, "open", lambda *a, **k: opens.append(a[0]) or real_open(*a, **k)
-    )
-    deep = "/".join("abcdefgh")
-    files = [(f"{deep}/x/f{i}", "f", b"", 0o644) for i in range(10)]
-    links = [(f"{deep}/x/h{i}", "h", f"{deep}/x/f{i}", 0o644) for i in range(10)] + [
-        (f"{deep}/y/h{i}", "h", f"{deep}/x/f{i}", 0o644) for i in range(10)
-    ]
-    untar.extract(io.BytesIO(make_tar(files)), str(tmp_path / "files"))
-    without_links = len(opens)
-    opens.clear()
-    untar.extract(io.BytesIO(make_tar(files + links)), str(tmp_path / "links"))
-    # Links in x open nothing, links in y open x, and y is opened, made and opened again
-    assert len(opens) - without_links == 10 + 2
-
-
 class FdCounter:
     """Tracks the file descriptors that os.open opens and os.close closes."""
 
     def __init__(self, monkeypatch):
         self.open = set()
+        self.opens = 0
         self.peak = 0
         self.real_open, self.real_close = os.open, os.close
         monkeypatch.setattr(os, "open", self._open)
@@ -332,12 +312,30 @@ class FdCounter:
     def _open(self, *args, **kwargs):
         fd = self.real_open(*args, **kwargs)
         self.open.add(fd)
+        self.opens += 1
         self.peak = max(self.peak, len(self.open))
         return fd
 
     def _close(self, fd):
         self.open.discard(fd)
         self.real_close(fd)
+
+
+@pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")
+def test_hardlinks_reuse_open_dirs(tmp_path, monkeypatch):
+    """A hardlink only opens the dirs of its target that are not open already."""
+    fds = FdCounter(monkeypatch)
+    deep = "/".join("abcdefgh")
+    files = [(f"{deep}/x/f{i}", "f", b"", 0o644) for i in range(10)]
+    links = [(f"{deep}/x/h{i}", "h", f"{deep}/x/f{i}", 0o644) for i in range(10)] + [
+        (f"{deep}/y/h{i}", "h", f"{deep}/x/f{i}", 0o644) for i in range(10)
+    ]
+    untar.extract(io.BytesIO(make_tar(files)), str(tmp_path / "files"))
+    without_links = fds.opens
+    fds.opens = 0
+    untar.extract(io.BytesIO(make_tar(files + links)), str(tmp_path / "links"))
+    # Links in x open nothing, links in y open x, and y is opened once made
+    assert fds.opens - without_links == 10 + 1
 
 
 @pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")
@@ -365,10 +363,12 @@ def test_open_dirs_are_bounded(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")
+@pytest.mark.parametrize("max_open_dirs", [3, 64])
 @pytest.mark.parametrize("valid", [True, False])
-def test_tmp_is_removed(tmp_path, monkeypatch, valid):
-    """tmp is removed through the open dirs, also below a prefix deeper than they are."""
-    monkeypatch.setattr(untar, "_MAX_OPEN_DIRS", 3)
+def test_tmp_is_removed(tmp_path, monkeypatch, valid, max_open_dirs):
+    """tmp is removed, also below a prefix deeper than the open dirs. After a successful
+    extraction whose dirs leading up to the root are all open, only rmdirs are needed."""
+    monkeypatch.setattr(untar, "_MAX_OPEN_DIRS", max_open_dirs)
     prefix = "/".join("abcdefghijkl")
     members = [
         (f"{prefix}/.spack", "d", None, 0o755),
@@ -378,10 +378,12 @@ def test_tmp_is_removed(tmp_path, monkeypatch, valid):
     if not valid:
         members.append(("../escape", "f", b"", 0o644))
     dest = tmp_path / "dest"
-    walked = []
-    remove_files = untar._remove_files
+    walks = []
+    remove_tmp = untar._Extractor._remove_tmp
     monkeypatch.setattr(
-        untar, "_remove_files", lambda d: walked.append(remove_files(d)) or walked[-1]
+        untar._Extractor,
+        "_remove_tmp",
+        lambda self: walks.append(1) or remove_tmp(self),
     )
     fds = FdCounter(monkeypatch)
     if valid:
@@ -395,11 +397,24 @@ def test_tmp_is_removed(tmp_path, monkeypatch, valid):
                 io.BytesIO(make_tar(members)), str(dest), root_marker=".spack"
             )
     assert sorted(os.listdir(dest)) == ([".spack", "x"] if valid else [])
-    if valid:
-        # finish removed the dirs leading up to the root, so tmp was empty
-        assert walked == [[]]
-    assert fds.peak <= 2 + 3 + 2
+    assert len(walks) == (0 if valid and max_open_dirs > 12 else 1)
+    # dest, tmp, the open dirs, and a dir or file being opened from the last of them
+    assert fds.peak <= 2 + min(max_open_dirs, 14) + 2
     assert not fds.open
+
+
+@pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")
+def test_deep_tmp_is_removed_in_linear_time(tmp_path, monkeypatch):
+    """Removing tmp opens each dir once, also far below the open dirs."""
+    monkeypatch.setattr(untar, "_MAX_OPEN_DIRS", 3)
+    depth = 1000
+    members = [("d/" * depth + "f", "f", b"", 0o644), ("../escape", "f", b"", 0o644)]
+    fds = FdCounter(monkeypatch)
+    with pytest.raises(untar.Error, match="unsafe path"):
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "dest"))
+    assert os.listdir(tmp_path / "dest") == []
+    # Extraction opens each dir once, and so does removal
+    assert fds.opens < 2 * depth + 10
 
 
 @pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")

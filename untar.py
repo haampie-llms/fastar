@@ -455,9 +455,19 @@ def _isreg(parent: Dir, name: str) -> bool:
         return False
 
 
-def _close(d: Optional[Dir]) -> None:
+def _close(d: Dir) -> None:
     if isinstance(d, int):
         os.close(d)
+
+
+def _rmdir(parent: Dir, name: str) -> bool:
+    """Remove the dir name in parent if it is empty, and return whether it was removed."""
+    path, dir_fd = _at(parent, name)
+    try:
+        os.rmdir(path, dir_fd=dir_fd)
+    except OSError:
+        return False
+    return True
 
 
 def _remove_files(d: Dir) -> List[str]:
@@ -497,7 +507,7 @@ class _Extractor:
     The open dirs are a stack of the ancestors of the current member, which for the depth-first
     order of tar archives changes little from one member to the next. Only the deepest
     ``_MAX_OPEN_DIRS`` of them stay open, so that deep archives do not run out of file
-    descriptors; a closed one is reopened from the deepest open one, or tmp, when needed.
+    descriptors; closed ones are opened again from tmp when needed.
 
     The archive name of the final root is only known after the last member. Validation only
     needs ``root``, the deepest dir containing every member that is not a dir leading up to
@@ -521,15 +531,18 @@ class _Extractor:
         self.marker: Optional[List[str]] = None
         #: Symlinks that could not be created, to be copies of targets extracted later
         self.links: List[Tuple[List[str], List[str]]] = []
-        #: Open dirs below tmp, and their names
+        #: The names of the dirs below tmp that lead to the current member
         self.names: List[str] = []
-        #: None where closed, which is only below the deepest _MAX_OPEN_DIRS
-        self.dirs: List[Optional[Dir]] = []
+        #: The deepest of those dirs, at most _MAX_OPEN_DIRS, which are open
+        self.dirs: List[Dir] = []
 
         if isinstance(dest, int):
+            if not _DIR_FD:
+                raise ValueError("dest cannot be a file descriptor on this platform")
             # A copy, so that the caller's file descriptor stays open
             self.dest: Dir = os.dup(dest)
         else:
+            os.makedirs(dest, exist_ok=True)
             dest = os.path.abspath(dest)
             if _WINDOWS and not dest.startswith("\\\\?\\"):
                 # an extended-length path, which may exceed MAX_PATH
@@ -561,35 +574,48 @@ class _Extractor:
 
     def close(self) -> None:
         """Remove tmp, as far as possible, and close the open dirs."""
-        with contextlib.suppress(OSError, Error):
-            self._remove_tmp()
-        for d in (*self.dirs, self.tmp):
+        # After finish, the stack holds the now empty dirs leading up to the root: remove the open
+        # ones bottom up, without listing them.
+        while self.dirs:
+            _close(self.dirs.pop())
+            name = self.names.pop()
+            n, parent = self._open_ancestor(len(self.names))
+            if n < len(self.names) or not _rmdir(parent, name):
+                break
+        for d in self.dirs:
             _close(d)
-        path, dir_fd = _at(self.dest, self.tmp_name)
-        with contextlib.suppress(OSError):
-            os.rmdir(path, dir_fd=dir_fd)
+        if not _rmdir(self.dest, self.tmp_name):
+            with contextlib.suppress(OSError):
+                self._remove_tmp()
+            _rmdir(self.dest, self.tmp_name)
+        _close(self.tmp)
         _close(self.dest)
 
     def _remove_tmp(self) -> None:
-        """Remove what is in tmp, depth first through the stack of open dirs, so without following
-        symlinks and with a bounded number of open dirs. Entries that cannot be removed stay."""
-        parts: List[str] = []
-        #: The subdirs that are left to remove, of tmp and of each dir in parts
-        pending = [_remove_files(self._dir(parts, create=False))]
-        while pending:
-            if pending[-1]:
-                parts.append(pending[-1].pop())
+        """Remove what is in tmp, as far as possible. The subdirs of a dir are moved into tmp
+        before it is removed, so that every dir is opened from tmp: without following symlinks,
+        one at a time, and in time linear in the number of entries, whatever their depth."""
+        todo = _remove_files(self.tmp)
+        taken = set(todo)
+        i = 0
+        while todo:
+            name = todo.pop()
+            with contextlib.suppress(OSError, Error):
+                d = _open_dir(self.tmp, name)
                 try:
-                    pending.append(_remove_files(self._dir(parts, create=False)))
-                except (OSError, Error):
-                    parts.pop()
-                continue
-            pending.pop()
-            if parts:
-                name = parts.pop()
-                path, dir_fd = _at(self._dir(parts, create=False), name)
-                with contextlib.suppress(OSError):
-                    os.rmdir(path, dir_fd=dir_fd)
+                    for sub in _remove_files(d):
+                        while str(i) in taken:
+                            i += 1
+                        path, dir_fd = _at(d, sub)
+                        new_path, new_dir_fd = _at(self.tmp, str(i))
+                        os.rename(
+                            path, new_path, src_dir_fd=dir_fd, dst_dir_fd=new_dir_fd
+                        )
+                        taken.add(str(i))
+                        todo.append(str(i))
+                finally:
+                    _close(d)
+                _rmdir(self.tmp, name)
 
     def _attrs(self, fd: Dir, mode: int, chmod: bool) -> None:
         """Set the group and mode of an open file or dir, which never follows a symlink."""
@@ -599,22 +625,18 @@ class _Extractor:
         if chmod:
             os.fchmod(fd, mode)  # type: ignore
 
-    def _dir(self, parts: List[str], create: bool = True) -> Dir:
+    def _dir(self, parts: List[str]) -> Dir:
         """Open tmp/parts, creating missing dirs, and keep its deepest ancestors open."""
-        common = _common(self.names, parts)
-        for d in self.dirs[common:]:
+        n, parent = self._open_ancestor(_common(self.names, parts))
+        # The open dirs above depth n stay
+        keep = max(n - len(self.names) + len(self.dirs), 0)
+        for d in self.dirs[keep:]:
             _close(d)
-        del self.names[common:], self.dirs[common:]
-        n, parent = self._ancestor(common)
-        if n < common:
-            parent, _ = self._open_existing(self.names)
-            self.dirs[-1] = parent
-        for name in parts[common:]:
+        del self.names[n:], self.dirs[keep:]
+        for name in parts[n:]:
             try:
                 d = _open_dir(parent, name)
             except FileNotFoundError:
-                if not create:
-                    raise
                 path, dir_fd = _at(parent, name)
                 os.mkdir(path, self.dir_mode, dir_fd=dir_fd)
                 d = _open_dir(parent, name)
@@ -627,17 +649,15 @@ class _Extractor:
         """Put an open dir on the stack, and close the one that is no longer among the deepest."""
         self.names.append(name)
         self.dirs.append(d)
-        i = len(self.dirs) - _MAX_OPEN_DIRS - 1
-        if i >= 0:
-            _close(self.dirs[i])
-            self.dirs[i] = None
+        if len(self.dirs) > _MAX_OPEN_DIRS:
+            _close(self.dirs.pop(0))
 
-    def _ancestor(self, n: int) -> Tuple[int, Dir]:
-        """The deepest open dir among the first n on the stack and its depth, or tmp and 0."""
-        for i in range(n - 1, -1, -1):
-            d = self.dirs[i]
-            if d is not None:
-                return i + 1, d
+    def _open_ancestor(self, n: int) -> Tuple[int, Dir]:
+        """The dir tmp/names[:n] and n if it is open, and otherwise tmp and 0: since only the
+        deepest dirs are open, none of its ancestors is then."""
+        closed = len(self.names) - len(self.dirs)
+        if n > closed:
+            return n, self.dirs[n - closed - 1]
         return 0, self.tmp
 
     def _file(
@@ -740,7 +760,7 @@ class _Extractor:
     def _open_existing(self, parts: List[str]) -> Tuple[Dir, bool]:
         """Open tmp/parts without creating anything, from the deepest dir on the stack that
         contains it. Returns the dir and whether it was opened here, and must be closed."""
-        common, d = self._ancestor(_common(self.names, parts))
+        common, d = self._open_ancestor(_common(self.names, parts))
         owned = False
         for name in parts[common:]:
             try:
@@ -828,12 +848,6 @@ class _Extractor:
             path, dir_fd = _at(src, name)
             new_path, new_dir_fd = _at(self.dest, name)
             os.rename(path, new_path, src_dir_fd=dir_fd, dst_dir_fd=new_dir_fd)
-
-        # Left in tmp are only the dirs leading up to the root, which are empty now
-        for i in range(len(root), 0, -1):
-            path, dir_fd = _at(self._dir(root[: i - 1]), root[i - 1])
-            with contextlib.suppress(OSError):
-                os.rmdir(path, dir_fd=dir_fd)
         return "/".join(root)
 
 
@@ -864,11 +878,6 @@ def extract(
     be created, their targets are copied."""
     if gid is not None and _WINDOWS:
         raise ValueError("gid is not supported on Windows")
-    if isinstance(dest, int):
-        if not _DIR_FD:
-            raise ValueError("dest cannot be a file descriptor on this platform")
-    else:
-        os.makedirs(dest, exist_ok=True)
     extractor = _Extractor(dest, root_marker, file_mode, dir_mode, gid)
     try:
         with _open_archive(src) as stream:
