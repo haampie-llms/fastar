@@ -16,6 +16,7 @@ import stat
 import struct
 import sys
 from typing import IO, Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from zlib import adler32 as _adler32
 
 __version__ = "0.1.0"
 __all__ = ["Error", "Member", "TarReader", "extract"]
@@ -44,6 +45,7 @@ _WINDOWS = sys.platform == "win32"
 _BLOCK = 512
 _EOF_BLOCK = bytes(_BLOCK)
 _CHUNK = 64 * 1024
+_BUF = 1024 * 1024
 #: Pax and GNU long name headers are read into memory: limit their size
 _MAX_EXTENDED = 1024 * 1024
 
@@ -101,7 +103,9 @@ def _int(field: bytes) -> int:
 
 def _checksum_ok(header: bytes) -> bool:
     expected = _int(header[148:156])
-    if expected == sum(header[:148]) + sum(header[156:]) + 256:
+    # adler32's low half is the byte sum mod 65521, which is exact for 256 bytes
+    total = (_adler32(header[:256], 0) & 0xFFFF) + (_adler32(header[256:], 0) & 0xFFFF)
+    if expected == total - sum(header[148:156]) + 256:
         return True
     # Some old tar implementations summed signed chars
     signed = struct.unpack("148b8x356b", header)
@@ -150,37 +154,76 @@ class TarReader:
         self.stream = stream
         #: Unread data of the current member
         self.remaining = 0
+        self.buf = b""
+        self.pos = 0
+
+    def _more(self, size: int) -> None:
+        """Make sure size bytes are buffered, or fewer at the end of the stream."""
+        parts = [self.buf[self.pos :]]
+        have = len(parts[0])
+        while have < size:
+            more = self.stream.read(max(_BUF, size - have))
+            if not more:
+                break
+            parts.append(more)
+            have += len(more)
+        self.buf = b"".join(parts)
+        self.pos = 0
 
     def _read(self, size: int) -> bytes:
-        data = _fill(self.stream, size)
-        if len(data) < size:
-            raise Error("Archive is truncated")
-        return data
+        if self.pos + size > len(self.buf):
+            self._more(size)
+            if size > len(self.buf):
+                raise Error("Archive is truncated")
+        pos = self.pos
+        self.pos = pos + size
+        return self.buf[pos : pos + size]
 
     def _header(self) -> Optional[bytes]:
-        header = _fill(self.stream, _BLOCK)
-        if header in (b"", _EOF_BLOCK):
+        if self.pos + _BLOCK > len(self.buf):
+            self._more(_BLOCK)
+            if not self.buf:
+                return None
+            if len(self.buf) < _BLOCK:
+                raise Error("Archive is truncated")
+        pos = self.pos
+        self.pos = pos + _BLOCK
+        header = self.buf[pos : pos + _BLOCK]
+        if header == _EOF_BLOCK:
             return None
-        if len(header) < _BLOCK:
-            raise Error("Archive is truncated")
         if not _checksum_ok(header):
             raise Error("Archive contains a header with an invalid checksum")
         return header
 
-    def chunks(self, size: int = _CHUNK) -> Iterator[bytes]:
-        """Yield the unread data of the current member."""
+    def chunks(self, size: int = _CHUNK) -> Iterator[memoryview]:
+        """Yield the unread data of the current member, as views that stay valid."""
         while self.remaining:
-            chunk = self._read(min(size, self.remaining))
-            self.remaining -= len(chunk)
-            yield chunk
+            if self.pos >= len(self.buf):
+                self._more(1)
+                if not self.buf:
+                    raise Error("Archive is truncated")
+            pos = self.pos
+            n = min(size, self.remaining, len(self.buf) - pos)
+            self.pos = pos + n
+            self.remaining -= n
+            yield memoryview(self.buf)[pos : pos + n]
 
     def __iter__(self) -> Iterator[Member]:
         global_pax: Dict[str, str] = {}
         padding = 0
         while True:
-            for _ in self.chunks():
-                pass
-            self._read(padding)
+            skip = self.remaining + padding
+            self.remaining = 0
+            if self.pos + skip <= len(self.buf):
+                self.pos += skip
+            else:
+                skip -= len(self.buf) - self.pos
+                self.buf, self.pos = b"", 0
+                while skip:
+                    more = self.stream.read(min(skip, _BUF))
+                    if not more:
+                        raise Error("Archive is truncated")
+                    skip -= len(more)
 
             pax: Dict[str, str] = {}
             while True:
@@ -444,7 +487,13 @@ class _Extractor:
             self.dirs.append(d)
         return self.dirs[-1] if self.dirs else self.tmp
 
-    def _file(self, parent: Dir, name: str, mode: int, chunks: Iterable[bytes]) -> None:
+    def _file(
+        self,
+        parent: Dir,
+        name: str,
+        mode: int,
+        chunks: Iterable[Union[bytes, memoryview]],
+    ) -> None:
         path, dir_fd = _at(parent, name)
         fd = os.open(path, _FILE_FLAGS, mode, dir_fd=dir_fd)
         try:
@@ -482,7 +531,17 @@ class _Extractor:
         if not parts:
             return
         if member.isdir():
-            self._dir(parts)
+            parent = self._dir(parts[:-1])
+            path, dir_fd = _at(parent, parts[-1])
+            try:
+                os.mkdir(path, self.dir_mode, dir_fd=dir_fd)
+            except FileExistsError:
+                self._dir(parts)
+                return
+            d = _open_dir(parent, parts[-1])
+            self._attrs(d, self.dir_mode, self.chmod_dirs)
+            self.names.append(parts[-1])
+            self.dirs.append(d)
             return
         parent = self._dir(parts[:-1])
         path, dir_fd = _at(parent, parts[-1])
