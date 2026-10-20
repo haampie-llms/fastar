@@ -11,7 +11,6 @@ import contextlib
 import errno
 import gzip
 import os
-import shutil
 import stat
 import struct
 import sys
@@ -461,6 +460,30 @@ def _close(d: Dir) -> None:
         os.close(d)
 
 
+def _rmdir(parent: Dir, name: str) -> bool:
+    """Remove the dir name in parent if it is empty, and return whether it was removed."""
+    path, dir_fd = _at(parent, name)
+    try:
+        os.rmdir(path, dir_fd=dir_fd)
+    except OSError:
+        return False
+    return True
+
+
+def _remove_files(d: Dir) -> List[str]:
+    """Remove the entries of d that are not dirs, as far as possible, and return its subdirs."""
+    subdirs = []
+    for name in os.listdir(d):
+        path, dir_fd = _at(d, name)
+        with contextlib.suppress(OSError):
+            s = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+            if stat.S_ISDIR(s.st_mode):
+                subdirs.append(name)
+            else:
+                os.unlink(path, dir_fd=dir_fd)
+    return subdirs
+
+
 #: Errors of creating a link where the platform or filesystem does not support it
 _UNSUPPORTED = {
     errno.EPERM,
@@ -526,7 +549,7 @@ class _Extractor:
                 break
             except FileExistsError:
                 pass
-        self.tmp_path = os.path.join(dest, tmp_name)
+        self.tmp_name = tmp_name
         self.tmp = _open_dir(self.dest, tmp_name)
 
         # Find out once what the filesystem does to new entries: mode bits the umask or default
@@ -543,10 +566,49 @@ class _Extractor:
         self.chmod_dirs = not _WINDOWS and stat.S_IMODE(s.st_mode) != dir_mode
 
     def close(self) -> None:
-        for d in (*self.dirs, self.tmp, self.dest):
+        """Remove tmp, as far as possible, and close the open dirs."""
+        # After finish, the stack holds the now empty dirs leading up to the root: remove the open
+        # ones bottom up, without listing them.
+        while self.dirs:
+            _close(self.dirs.pop())
+            name = self.names.pop()
+            n, parent = self._open_ancestor(len(self.names))
+            if n < len(self.names) or not _rmdir(parent, name):
+                break
+        for d in self.dirs:
             _close(d)
-        # rmtree walks with dir file descriptors where supported, so depth is no problem
-        shutil.rmtree(self.tmp_path, ignore_errors=True)
+        if not _rmdir(self.dest, self.tmp_name):
+            with contextlib.suppress(OSError):
+                self._remove_tmp()
+            _rmdir(self.dest, self.tmp_name)
+        _close(self.tmp)
+        _close(self.dest)
+
+    def _remove_tmp(self) -> None:
+        """Remove what is in tmp, as far as possible. The subdirs of a dir are moved into tmp
+        before it is removed, so that every dir is opened from tmp: without following symlinks,
+        one at a time, and in time linear in the number of entries, whatever their depth."""
+        todo = _remove_files(self.tmp)
+        taken = set(todo)
+        i = 0
+        while todo:
+            name = todo.pop()
+            with contextlib.suppress(OSError, Error):
+                d = _open_dir(self.tmp, name)
+                try:
+                    for sub in _remove_files(d):
+                        while str(i) in taken:
+                            i += 1
+                        path, dir_fd = _at(d, sub)
+                        new_path, new_dir_fd = _at(self.tmp, str(i))
+                        os.rename(
+                            path, new_path, src_dir_fd=dir_fd, dst_dir_fd=new_dir_fd
+                        )
+                        taken.add(str(i))
+                        todo.append(str(i))
+                finally:
+                    _close(d)
+                _rmdir(self.tmp, name)
 
     def _attrs(self, fd: Dir, mode: int, chmod: bool) -> None:
         """Set the group and mode of an open file or dir, which never follows a symlink."""
