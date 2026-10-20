@@ -138,9 +138,23 @@ def supported(member: tarfile.TarInfo) -> bool:
     return member.type not in UNSUPPORTED and not member.issparse()
 
 
-def without_unsupported(data: bytes) -> bytes:
-    """testtar.tar without sparse and special files, with every other header kept as is."""
-    kept = b"".join(raw for member, raw in raw_members(data) if supported(member))
+def utf8(member: tarfile.TarInfo) -> bool:
+    try:
+        member.name.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def without_unsupported(data: bytes, extractable: bool = False) -> bytes:
+    """testtar.tar without sparse and special files, with every other header kept as is. To be
+    extractable, also without names that are not UTF-8, which macOS refuses."""
+    kept = b"".join(
+        raw
+        for member, raw in raw_members(data)
+        if supported(member)
+        and (not extractable or sys.platform != "darwin" or utf8(member))
+    )
     return kept + bytes(1024)
 
 
@@ -250,7 +264,7 @@ def test_ustar_sparse_is_a_regular_file():
 @needs_testdata
 def test_extract_like_tarfile(tmp_path):
     """Extracting gives the tree tarfile extracts, with names like ./x and long names."""
-    data = without_unsupported(read_testtar())
+    data = without_unsupported(read_testtar(), extractable=True)
     with tarfile.open(fileobj=io.BytesIO(data)) as tar:
         tar.extraction_filter = lambda member, path: member
         tar.extractall(tmp_path / "expected")
@@ -271,7 +285,7 @@ def test_gzip_and_stream(tmp_path):
     """GzipUstarReadTest and StreamReadTest: the same members from a gzipped, unseekable stream."""
     import gzip
 
-    data = without_unsupported(read_testtar())
+    data = without_unsupported(read_testtar(), extractable=True)
 
     class Stream:
         def __init__(self, data):
