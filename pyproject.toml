@@ -1,0 +1,45 @@
+[project]
+name = "fastar"
+description = "Fast, streaming extraction of tar archives"
+readme = "README.md"
+requires-python = ">=3.6"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Harmen Stoppels", email = "me@harmenstoppels.nl" }]
+keywords = ["tar", "archive", "extract"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: System :: Archiving",
+]
+dependencies = []
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/haampie-llms/fastar"
+Repository = "https://github.com/haampie-llms/fastar"
+
+[project.optional-dependencies]
+dev = ["pytest", "hypothesis", "ruff", "mypy"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "fastar.py"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["fastar.py"]
+
+[tool.mypy]
+files = ["fastar.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+# The oldest target ruff supports; requires-python is lower
+target-version = "py37"
+# from __future__ import annotations needs Python 3.7
+lint.ignore = ["FA100"]
