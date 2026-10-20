@@ -25,10 +25,17 @@ SYMTYPE = b"2"
 DIRTYPE = b"5"
 CONTTYPE = b"7"
 _PAX_HEADER = b"x"
+_SOLARIS_PAX_HEADER = b"X"
 _PAX_GLOBAL_HEADER = b"g"
 _GNU_LONGNAME = b"L"
 _GNU_LONGLINK = b"K"
-_EXTENDED = (_PAX_HEADER, _PAX_GLOBAL_HEADER, _GNU_LONGNAME, _GNU_LONGLINK)
+_EXTENDED = (
+    _PAX_HEADER,
+    _SOLARIS_PAX_HEADER,
+    _PAX_GLOBAL_HEADER,
+    _GNU_LONGNAME,
+    _GNU_LONGLINK,
+)
 _DATA_TYPES = (REGTYPE, AREGTYPE, CONTTYPE)
 
 _BLOCK = 512
@@ -181,7 +188,7 @@ class TarReader:
                     raise Error(f"Archive contains an extended header of {size} bytes")
                 data = self._read(size)
                 self._read(-size % _BLOCK)
-                if type == _PAX_HEADER:
+                if type in (_PAX_HEADER, _SOLARIS_PAX_HEADER):
                     pax = dict(global_pax) if pax is None else pax
                     pax.update(_pax_records(data))
                 elif type == _PAX_GLOBAL_HEADER:
@@ -429,6 +436,12 @@ class _Extractor:
         try:
             os.mkdir(path, self.dir_mode, dir_fd=dir_fd)
         except FileExistsError:
+            if not stat.S_ISDIR(
+                os.stat(path, dir_fd=dir_fd, follow_symlinks=False).st_mode
+            ):
+                raise Error(
+                    f"Archive contains dir {name} where a non-directory is"
+                ) from None
             return
         if self.chown or self.chmod_dirs:
             d = _open_dir(parent, name)
@@ -512,6 +525,8 @@ class _Extractor:
         elif member.issym():
             try:
                 os.symlink(member.linkname, path, dir_fd=dir_fd)
+            except FileExistsError:
+                raise
             except OSError:
                 # Like tarfile, copy the target instead where symlinks are not supported.
                 target = _resolve(parts, member.linkname)
@@ -537,6 +552,8 @@ class _Extractor:
                     raise Error(
                         f"Archive hardlinks {member.linkname}, which is not extracted"
                     )
+                except FileExistsError:
+                    raise
                 except OSError:
                     self._copy(
                         target, parts

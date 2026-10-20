@@ -482,3 +482,27 @@ def test_links_are_copied_where_unsupported(tmp_path, monkeypatch, target_first)
         path = tmp_path / "lib" / name
         assert not path.is_symlink() and path.read_bytes() == b"foo"
     assert (tmp_path / "lib" / "sub").is_dir()
+
+
+def test_solaris_extended_header(tmp_path):
+    """Solaris tar writes pax headers with type X instead of x."""
+    data = bytearray(make_tar([("x" * 120, "f", b"long", 0o644)], tarfile.PAX_FORMAT))
+    assert data[156:157] == tarfile.XHDTYPE
+    data[156:157] = b"X"
+    data[148:156] = b"%06o\0 " % (sum(data[:148]) + sum(data[156:512]) + 256)
+    fastar.extract(io.BytesIO(bytes(data)), str(tmp_path))
+    assert (tmp_path / ("x" * 120)).read_bytes() == b"long"
+
+
+@needs_symlinks
+@pytest.mark.parametrize(
+    "members",
+    [
+        [("link", "s", ".", 0o777), ("link", "s", "..", 0o777)],
+        [("link", "s", ".", 0o777), ("link", "d", None, 0o755)],
+        [("file", "f", b"", 0o644), ("file", "d", None, 0o755)],
+    ],
+)
+def test_no_entries_over_others(tmp_path, members):
+    with pytest.raises((FileExistsError, fastar.Error)):
+        fastar.extract(io.BytesIO(make_tar(members)), str(tmp_path))
