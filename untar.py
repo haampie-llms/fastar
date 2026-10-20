@@ -50,6 +50,8 @@ _CHUNK = 64 * 1024
 _BUF = 1024 * 1024
 #: Pax and GNU long name headers are read into memory: limit their size per member
 _MAX_EXTENDED = 1024 * 1024
+#: Dirs on the stack that stay open: the deepest ones, and shallower ones are reopened if needed
+_MAX_OPEN_DIRS = 64
 _BadGzipFile = getattr(gzip, "BadGzipFile", OSError)
 
 
@@ -480,7 +482,9 @@ class _Extractor:
     Entries are created relative to open dir file descriptors, so paths are never longer than
     a single name, and nothing is written through a symlink, even one swapped in concurrently.
     The open dirs are a stack of the ancestors of the current member, which for the depth-first
-    order of tar archives changes little from one member to the next.
+    order of tar archives changes little from one member to the next. Only the deepest
+    ``_MAX_OPEN_DIRS`` of them stay open, so that deep archives do not run out of file
+    descriptors; closed ones are opened again from tmp when needed.
 
     The archive name of the final root is only known after the last member. Validation only
     needs ``root``, the deepest dir containing every member that is not a dir leading up to
@@ -504,8 +508,9 @@ class _Extractor:
         self.marker: Optional[List[str]] = None
         #: Symlinks that could not be created, to be copies of targets extracted later
         self.links: List[Tuple[List[str], List[str]]] = []
-        #: Open dirs below tmp, and their names
+        #: The names of the dirs below tmp that lead to the current member
         self.names: List[str] = []
+        #: The deepest of those dirs, at most _MAX_OPEN_DIRS, which are open
         self.dirs: List[Dir] = []
 
         dest = os.path.abspath(dest)
@@ -552,13 +557,14 @@ class _Extractor:
             os.fchmod(fd, mode)  # type: ignore
 
     def _dir(self, parts: List[str]) -> Dir:
-        """Open tmp/parts, creating missing dirs, and keep its ancestors open."""
-        common = _common(self.names, parts)
-        for d in self.dirs[common:]:
+        """Open tmp/parts, creating missing dirs, and keep its deepest ancestors open."""
+        n, parent = self._open_ancestor(_common(self.names, parts))
+        # The open dirs above depth n stay
+        keep = max(n - len(self.names) + len(self.dirs), 0)
+        for d in self.dirs[keep:]:
             _close(d)
-        del self.names[common:], self.dirs[common:]
-        for name in parts[common:]:
-            parent = self.dirs[-1] if self.dirs else self.tmp
+        del self.names[n:], self.dirs[keep:]
+        for name in parts[n:]:
             try:
                 d = _open_dir(parent, name)
             except FileNotFoundError:
@@ -566,9 +572,24 @@ class _Extractor:
                 os.mkdir(path, self.dir_mode, dir_fd=dir_fd)
                 d = _open_dir(parent, name)
                 self._attrs(d, self.dir_mode, self.chmod_dirs)
-            self.names.append(name)
-            self.dirs.append(d)
-        return self.dirs[-1] if self.dirs else self.tmp
+            self._push(name, d)
+            parent = d
+        return parent
+
+    def _push(self, name: str, d: Dir) -> None:
+        """Put an open dir on the stack, and close the one that is no longer among the deepest."""
+        self.names.append(name)
+        self.dirs.append(d)
+        if len(self.dirs) > _MAX_OPEN_DIRS:
+            _close(self.dirs.pop(0))
+
+    def _open_ancestor(self, n: int) -> Tuple[int, Dir]:
+        """The dir tmp/names[:n] and n if it is open, and otherwise tmp and 0: since only the
+        deepest dirs are open, none of its ancestors is then."""
+        closed = len(self.names) - len(self.dirs)
+        if n > closed:
+            return n, self.dirs[n - closed - 1]
+        return 0, self.tmp
 
     def _file(
         self,
@@ -627,8 +648,7 @@ class _Extractor:
                 return
             d = _open_dir(parent, parts[-1])
             self._attrs(d, self.dir_mode, self.chmod_dirs)
-            self.names.append(parts[-1])
-            self.dirs.append(d)
+            self._push(parts[-1], d)
             return
         parent = self._dir(parts[:-1])
         path, dir_fd = _at(parent, parts[-1])
@@ -671,8 +691,7 @@ class _Extractor:
     def _open_existing(self, parts: List[str]) -> Tuple[Dir, bool]:
         """Open tmp/parts without creating anything, from the deepest dir on the stack that
         contains it. Returns the dir and whether it was opened here, and must be closed."""
-        common = _common(self.names, parts)
-        d = self.dirs[common - 1] if common else self.tmp
+        common, d = self._open_ancestor(_common(self.names, parts))
         owned = False
         for name in parts[common:]:
             try:
