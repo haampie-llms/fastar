@@ -298,25 +298,68 @@ def test_no_hardlinks_through_symlinks(tmp_path):
     assert (outside / "secret").stat().st_nlink == 1
 
 
+class FdCounter:
+    """Tracks the file descriptors that os.open opens and os.close closes."""
+
+    def __init__(self, monkeypatch):
+        self.open = set()
+        self.opens = 0
+        self.peak = 0
+        self.real_open, self.real_close = os.open, os.close
+        monkeypatch.setattr(os, "open", self._open)
+        monkeypatch.setattr(os, "close", self._close)
+
+    def _open(self, *args, **kwargs):
+        fd = self.real_open(*args, **kwargs)
+        self.open.add(fd)
+        self.opens += 1
+        self.peak = max(self.peak, len(self.open))
+        return fd
+
+    def _close(self, fd):
+        self.open.discard(fd)
+        self.real_close(fd)
+
+
 @pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")
 def test_hardlinks_reuse_open_dirs(tmp_path, monkeypatch):
     """A hardlink only opens the dirs of its target that are not open already."""
-    opens = []
-    real_open = os.open
-    monkeypatch.setattr(
-        os, "open", lambda *a, **k: opens.append(a[0]) or real_open(*a, **k)
-    )
+    fds = FdCounter(monkeypatch)
     deep = "/".join("abcdefgh")
     files = [(f"{deep}/x/f{i}", "f", b"", 0o644) for i in range(10)]
     links = [(f"{deep}/x/h{i}", "h", f"{deep}/x/f{i}", 0o644) for i in range(10)] + [
         (f"{deep}/y/h{i}", "h", f"{deep}/x/f{i}", 0o644) for i in range(10)
     ]
     untar.extract(io.BytesIO(make_tar(files)), str(tmp_path / "files"))
-    without_links = len(opens)
-    opens.clear()
+    without_links = fds.opens
+    fds.opens = 0
     untar.extract(io.BytesIO(make_tar(files + links)), str(tmp_path / "links"))
-    # Links in x open nothing, links in y open x, and y is opened, made and opened again
-    assert len(opens) - without_links == 10 + 2
+    # Links in x open nothing, links in y open x, and y is opened once made
+    assert fds.opens - without_links == 10 + 1
+
+
+@pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")
+def test_open_dirs_are_bounded(tmp_path, monkeypatch):
+    """Only the deepest dirs on the stack stay open, and shallower ones are reopened."""
+    monkeypatch.setattr(untar, "_MAX_OPEN_DIRS", 3)
+    deep = "/".join("abcdefghij")
+    members = [
+        (f"{deep}/x/f", "f", b"f", 0o644),
+        ("a/b/g", "f", b"g", 0o644),  # above the open dirs
+        (f"{deep}/x/h", "h", f"{deep}/x/f", 0o644),
+        (f"{deep}/y", "d", None, 0o755),
+        ("a/b/c/l", "s", "d/e", 0o777),
+        (f"{deep}/y/h", "h", "a/b/g", 0o644),
+        ("a/b/c/d/e/z", "f", b"z", 0o644),
+    ]
+    fds = FdCounter(monkeypatch)
+    untar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "actual"))
+    monkeypatch.undo()
+    tarfile_extract(make_tar(members), tmp_path / "expected")
+    assert snapshot(tmp_path / "actual") == snapshot(tmp_path / "expected")
+    # dest, tmp, the open dirs, and a dir or file being opened from the last of them
+    assert fds.peak <= 2 + 3 + 2
+    assert not fds.open
 
 
 def test_no_overwrites(tmp_path):
