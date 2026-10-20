@@ -603,7 +603,7 @@ def test_chmod_outside_dir(outerdir):
     arc.add("a/pwn/", mode=0o777)
     arc.add("a/pwn", symlink_to="x/../")
     arc.add("a/x", symlink_to="../")
-    rejected(extract(arc, outerdir), match="where a non-directory is")
+    rejected(extract(arc, outerdir), match="not a directory")
 
 
 @needs_symlinks

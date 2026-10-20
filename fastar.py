@@ -6,6 +6,7 @@ directory that is only known from the archive's contents: the parent of the shal
 with a given name. Files are created with their final permissions.
 """
 
+import contextlib
 import errno
 import gzip
 import os
@@ -13,10 +14,10 @@ import shutil
 import stat
 import struct
 import sys
-from typing import IO, Dict, Iterator, List, Optional, Tuple, Union
+from typing import IO, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 __version__ = "0.1.0"
-__all__ = ["Error", "Member", "TarReader", "extract", "open_archive"]
+__all__ = ["Error", "Member", "TarReader", "extract"]
 
 REGTYPE = b"0"
 AREGTYPE = b"\0"
@@ -38,6 +39,7 @@ _EXTENDED = (
 )
 _DATA_TYPES = (REGTYPE, AREGTYPE, CONTTYPE)
 
+_WINDOWS = sys.platform == "win32"
 _BLOCK = 512
 _EOF_BLOCK = bytes(_BLOCK)
 _CHUNK = 64 * 1024
@@ -125,6 +127,17 @@ def _pax_records(data: bytes) -> Dict[str, str]:
     return records
 
 
+def _fill(stream: IO[bytes], size: int) -> bytes:
+    """Read size bytes, or fewer at the end of the stream."""
+    data = stream.read(size)
+    while 0 < len(data) < size:
+        more = stream.read(size - len(data))
+        if not more:
+            break
+        data += more
+    return data
+
+
 class TarReader:
     """Reads the members of a tar archive front to back from a binary stream, without seeking.
 
@@ -136,24 +149,19 @@ class TarReader:
         self.stream = stream
         #: Unread data of the current member
         self.remaining = 0
-        #: Padding after the data of the current member
-        self.padding = 0
 
     def _read(self, size: int) -> bytes:
-        data = self.stream.read(size)
-        while len(data) < size:
-            more = self.stream.read(size - len(data))
-            if not more:
-                raise Error("Archive is truncated")
-            data += more
+        data = _fill(self.stream, size)
+        if len(data) < size:
+            raise Error("Archive is truncated")
         return data
 
     def _header(self) -> Optional[bytes]:
-        header = self.stream.read(_BLOCK)
-        if 0 < len(header) < _BLOCK:
-            header += self._read(_BLOCK - len(header))
-        if not header or header == _EOF_BLOCK:
+        header = _fill(self.stream, _BLOCK)
+        if header in (b"", _EOF_BLOCK):
             return None
+        if len(header) < _BLOCK:
+            raise Error("Archive is truncated")
         if not _checksum_ok(header):
             raise Error("Archive contains a header with an invalid checksum")
         return header
@@ -167,15 +175,13 @@ class TarReader:
 
     def __iter__(self) -> Iterator[Member]:
         global_pax: Dict[str, str] = {}
+        padding = 0
         while True:
             for _ in self.chunks():
                 pass
-            self._read(self.padding)
-            self.padding = 0
+            self._read(padding)
 
-            pax: Optional[Dict[str, str]] = None
-            long_name: Optional[str] = None
-            long_link: Optional[str] = None
+            pax: Dict[str, str] = {}
             while True:
                 header = self._header()
                 if header is None:
@@ -188,17 +194,13 @@ class TarReader:
                     raise Error(f"Archive contains an extended header of {size} bytes")
                 data = self._read(size)
                 self._read(-size % _BLOCK)
-                if type in (_PAX_HEADER, _SOLARIS_PAX_HEADER):
-                    pax = dict(global_pax) if pax is None else pax
-                    pax.update(_pax_records(data))
-                elif type == _PAX_GLOBAL_HEADER:
+                if type == _PAX_GLOBAL_HEADER:
                     global_pax.update(_pax_records(data))
-                elif type == _GNU_LONGNAME:
-                    long_name = _str(data)
+                elif type in (_PAX_HEADER, _SOLARIS_PAX_HEADER):
+                    pax.update(_pax_records(data))
                 else:
-                    long_link = _str(data)
-            if pax is None:
-                pax = global_pax
+                    pax["path" if type == _GNU_LONGNAME else "linkpath"] = _str(data)
+            pax = {**global_pax, **pax}
 
             name = _str(header[0:100])
             if header[257:263] == b"ustar\0":
@@ -212,7 +214,7 @@ class TarReader:
                     f"Archive contains a sparse file {name}, which is not supported"
                 )
 
-            name = pax.get("path", long_name or name)
+            name = pax.get("path", name)
             if type == DIRTYPE:
                 name = name.rstrip("/") or name
             member = Member(
@@ -220,12 +222,12 @@ class TarReader:
                 type,
                 _int(header[100:108]),
                 int(pax["size"]) if "size" in pax else _int(header[124:136]),
-                pax.get("linkpath", long_link or _str(header[157:257])),
+                pax.get("linkpath", _str(header[157:257])),
             )
 
             # Like tarfile, only regular files have data
             self.remaining = member.size if type in _DATA_TYPES else 0
-            self.padding = -self.remaining % _BLOCK
+            padding = -self.remaining % _BLOCK
             yield member
 
 
@@ -248,38 +250,31 @@ class _Prepend:
         return data
 
 
-class open_archive:
+@contextlib.contextmanager
+def _open_archive(
+    src: Union[str, "os.PathLike[str]", IO[bytes]],
+) -> Iterator[IO[bytes]]:
     """Open a path or a binary file object as a stream of uncompressed tar data, which is
     detected from the first bytes. Use as a context manager; file objects are not closed."""
+    file = open(src, "rb") if isinstance(src, (str, os.PathLike)) else None  # noqa: SIM115
+    try:
+        stream = file or src
+        magic = _fill(stream, 2)  # type: ignore[arg-type]
+        head = _Prepend(magic, stream)  # type: ignore[arg-type]
+        yield gzip.GzipFile(fileobj=head, mode="rb") if magic == b"\x1f\x8b" else head  # type: ignore
+    finally:
+        if file is not None:
+            file.close()
 
-    def __init__(self, src: Union[str, "os.PathLike[str]", IO[bytes]]) -> None:
-        self._file: Optional[IO[bytes]] = None
-        if isinstance(src, (str, os.PathLike)):
-            self._file = src = open(src, "rb")  # noqa: SIM115, closed by close()
-        try:
-            magic = src.read(2)
-            while 0 < len(magic) < 2:
-                more = src.read(2 - len(magic))
-                if not more:
-                    break
-                magic += more
-            head = _Prepend(magic, src)
-            self.stream: IO[bytes] = head  # type: ignore[assignment]
-            if magic == b"\x1f\x8b":
-                self.stream = gzip.GzipFile(fileobj=head, mode="rb")  # type: ignore[call-overload]
-        except BaseException:
-            self.close()
-            raise
 
-    def close(self) -> None:
-        if self._file is not None:
-            self._file.close()
-
-    def __enter__(self) -> IO[bytes]:
-        return self.stream
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
+def _common(a: List[str], b: List[str]) -> int:
+    """The number of leading names a and b have in common."""
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
 
 
 def _parts(name: str) -> List[str]:
@@ -288,7 +283,7 @@ def _parts(name: str) -> List[str]:
     if (
         name.startswith("/")
         or ".." in parts
-        or sys.platform == "win32"
+        or _WINDOWS
         and any("\\" in p or ":" in p for p in parts)
     ):
         raise Error(f"Archive contains unsafe path {name}")
@@ -310,16 +305,14 @@ def _resolve(parts: List[str], linkname: str) -> Optional[List[str]]:
     return target
 
 
-_WINDOWS = sys.platform == "win32"
-
 #: Whether entries are created relative to open dir file descriptors. Otherwise, as on Windows,
 #: they are created by (extended-length) path.
 _DIR_FD = {os.open, os.mkdir, os.symlink, os.link, os.rename} <= os.supports_dir_fd
-_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-for _flag in ("O_NOFOLLOW", "O_CLOEXEC", "O_BINARY"):
-    _FILE_FLAGS |= getattr(os, _flag, 0)
-_DIR_FLAGS |= getattr(os, "O_CLOEXEC", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_BINARY = getattr(os, "O_BINARY", 0)
+# os.open makes file descriptors non-inheritable, so O_CLOEXEC is implied
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _O_NOFOLLOW
+_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_BINARY
 
 #: An open dir: a file descriptor, or a path where dir file descriptors are not supported
 Dir = Union[int, str]
@@ -344,9 +337,7 @@ def _open_dir(parent: Dir, name: str) -> Dir:
                 ) from e
             raise
     path = os.path.join(parent, name)
-    if os.path.islink(path) or not os.path.isdir(path):
-        if not os.path.lexists(path):
-            raise FileNotFoundError(path)
+    if not stat.S_ISDIR(os.lstat(path).st_mode):
         raise Error(f"Archive writes through {name}, which is not a directory")
     return path
 
@@ -369,37 +360,42 @@ class _Extractor:
     it. State is bounded by the depth of the archive."""
 
     def __init__(
-        self, dest: str, file_mode: int, dir_mode: int, gid: Optional[int]
+        self,
+        dest: str,
+        root_marker: Optional[str],
+        file_mode: int,
+        dir_mode: int,
+        gid: Optional[int],
     ) -> None:
         self.file_mode = file_mode
         self.dir_mode = dir_mode
         self.gid = gid
         self.root: List[str] = []
         self.descending = True
+        self.marker_name = root_marker
         #: The shallowest member with the marker name
         self.marker: Optional[List[str]] = None
-        self.marker_name: Optional[str] = None
         #: Symlinks that could not be created, to be copies of targets extracted later
         self.links: List[Tuple[List[str], List[str]]] = []
-        #: Open dirs below tmp, with their names
-        self.stack: List[Tuple[str, Dir]] = []
+        #: Open dirs below tmp, and their names
+        self.names: List[str] = []
+        self.dirs: List[Dir] = []
 
         dest = os.path.abspath(dest)
         if _WINDOWS and not dest.startswith("\\\\?\\"):
-            dest = (
-                "\\\\?\\" + dest
-            )  # an extended-length path, which may exceed MAX_PATH
+            # an extended-length path, which may exceed MAX_PATH
+            dest = "\\\\?\\" + dest
         self.dest: Dir = os.open(dest, _DIR_FLAGS) if _DIR_FD else dest
         while True:
-            self.tmp_name = f".fastar-{os.urandom(4).hex()}"
-            self.tmp_path = os.path.join(dest, self.tmp_name)
+            tmp_name = f".fastar-{os.urandom(4).hex()}"
+            path, dir_fd = _at(self.dest, tmp_name)
             try:
-                path, dir_fd = _at(self.dest, self.tmp_name)
                 os.mkdir(path, 0o700, dir_fd=dir_fd)
                 break
             except FileExistsError:
-                continue
-        self.tmp = _open_dir(self.dest, self.tmp_name)
+                pass
+        self.tmp_path = os.path.join(dest, tmp_name)
+        self.tmp = _open_dir(self.dest, tmp_name)
 
         # Find out once what the filesystem does to new entries: mode bits the umask or default
         # ACLs strip, special bits it does not set, and the group they get.
@@ -415,83 +411,63 @@ class _Extractor:
         self.chmod_dirs = not _WINDOWS and stat.S_IMODE(s.st_mode) != dir_mode
 
     def close(self) -> None:
-        for _, d in self.stack:
+        for d in (*self.dirs, self.tmp, self.dest):
             _close(d)
-        self.stack.clear()
-        _close(self.tmp)
-        _close(self.dest)
         # rmtree walks with dir file descriptors where supported, so depth is no problem
         shutil.rmtree(self.tmp_path, ignore_errors=True)
 
-    def _attrs(self, fd: int, mode: int, chmod: bool) -> None:
+    def _attrs(self, fd: Dir, mode: int, chmod: bool) -> None:
         """Set the group and mode of an open file or dir, which never follows a symlink."""
         # chown before chmod, since chown may clear set-user-ID and set-group-ID bits
         if self.chown:
-            os.fchown(fd, -1, self.gid)  # type: ignore[arg-type]
+            os.fchown(fd, -1, self.gid)  # type: ignore
         if chmod:
-            os.fchmod(fd, mode)
-
-    def _mkdir(self, parent: Dir, name: str) -> None:
-        path, dir_fd = _at(parent, name)
-        try:
-            os.mkdir(path, self.dir_mode, dir_fd=dir_fd)
-        except FileExistsError:
-            if not stat.S_ISDIR(
-                os.stat(path, dir_fd=dir_fd, follow_symlinks=False).st_mode
-            ):
-                raise Error(
-                    f"Archive contains dir {name} where a non-directory is"
-                ) from None
-            return
-        if self.chown or self.chmod_dirs:
-            d = _open_dir(parent, name)
-            try:
-                self._attrs(d, self.dir_mode, self.chmod_dirs)  # type: ignore[arg-type]
-            finally:
-                _close(d)
+            os.fchmod(fd, mode)  # type: ignore
 
     def _dir(self, parts: List[str]) -> Dir:
         """Open tmp/parts, creating missing dirs, and keep its ancestors open."""
-        common = 0
-        while (
-            common < len(self.stack)
-            and common < len(parts)
-            and self.stack[common][0] == parts[common]
-        ):
-            common += 1
-        for _, d in self.stack[common:]:
+        common = _common(self.names, parts)
+        for d in self.dirs[common:]:
             _close(d)
-        del self.stack[common:]
-        parent = self.stack[-1][1] if self.stack else self.tmp
+        del self.names[common:], self.dirs[common:]
         for name in parts[common:]:
+            parent = self.dirs[-1] if self.dirs else self.tmp
             try:
                 d = _open_dir(parent, name)
             except FileNotFoundError:
-                self._mkdir(parent, name)
+                path, dir_fd = _at(parent, name)
+                os.mkdir(path, self.dir_mode, dir_fd=dir_fd)
                 d = _open_dir(parent, name)
-            self.stack.append((name, d))
-            parent = d
-        return parent
+                self._attrs(d, self.dir_mode, self.chmod_dirs)
+            self.names.append(name)
+            self.dirs.append(d)
+        return self.dirs[-1] if self.dirs else self.tmp
+
+    def _file(self, parent: Dir, name: str, mode: int, chunks: Iterable[bytes]) -> None:
+        path, dir_fd = _at(parent, name)
+        fd = os.open(path, _FILE_FLAGS, mode, dir_fd=dir_fd)
+        try:
+            for data in chunks:
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view) :]
+            self._attrs(fd, mode, self.chmod_files)
+        finally:
+            os.close(fd)
 
     def _track(self, member: Member, parts: List[str]) -> None:
-        """Update root, which validation needs."""
-        if (
-            self.marker_name is not None
-            and parts
-            and parts[-1] == self.marker_name
-            and (self.marker is None or len(parts) < len(self.marker))
+        """Update root, which validation needs, and marker."""
+        if parts[-1:] == [self.marker_name] and (
+            self.marker is None or len(parts) < len(self.marker)
         ):
             self.marker = parts
-        n = len(self.root)
-        if parts == self.root[: len(parts)]:
+        common = _common(parts, self.root)
+        if common == len(parts):
             if not member.isdir():
                 raise Error(
                     f"Archive contains non-directory {member.name} where a directory is"
                 )
-        elif parts[:n] != self.root:
-            common = 0
-            while parts[common] == self.root[common]:
-                common += 1
+        elif common < len(self.root):
             self.root = self.root[:common]
             self.descending = False
         elif self.descending:
@@ -504,24 +480,15 @@ class _Extractor:
         self._track(member, parts)
         if not parts:
             return
-        parent = self._dir(parts[:-1])
-        name = parts[-1]
-        path, dir_fd = _at(parent, name)
-
         if member.isdir():
-            self._mkdir(parent, name)
-        elif member.isreg():
+            self._dir(parts)
+            return
+        parent = self._dir(parts[:-1])
+        path, dir_fd = _at(parent, parts[-1])
+        if member.isreg():
             # Like chmod +X: only executable if the member is executable by its owner
             mode = self.file_mode if member.mode & 0o100 else self.file_mode & ~0o111
-            fd = os.open(path, _FILE_FLAGS, mode, dir_fd=dir_fd)
-            try:
-                for data in reader.chunks():
-                    chunk = memoryview(data)
-                    while chunk:
-                        chunk = chunk[os.write(fd, chunk) :]
-                self._attrs(fd, mode, self.chmod_files)
-            finally:
-                os.close(fd)
+            self._file(parent, parts[-1], mode, reader.chunks())
         elif member.issym():
             try:
                 os.symlink(member.linkname, path, dir_fd=dir_fd)
@@ -536,30 +503,10 @@ class _Extractor:
             if self.chown:
                 os.chown(path, -1, self.gid, dir_fd=dir_fd, follow_symlinks=False)  # type: ignore
         elif member.islnk():
-            target = _parts(member.linkname)
-            source_parent = self._open_chain(target[:-1])
-            try:
-                source, source_fd = _at(source_parent, target[-1])
-                try:
-                    os.link(
-                        source,
-                        path,
-                        src_dir_fd=source_fd,
-                        dst_dir_fd=dir_fd,
-                        follow_symlinks=False,
-                    )
-                except FileNotFoundError:
-                    raise Error(
-                        f"Archive hardlinks {member.linkname}, which is not extracted"
-                    )
-                except FileExistsError:
-                    raise
-                except OSError:
-                    self._copy(
-                        target, parts
-                    )  # like tarfile where hardlinks are not supported
-            finally:
-                _close(source_parent)
+            if not self._copy(_parts(member.linkname), parts, link=True):
+                raise Error(
+                    f"Archive hardlinks {member.linkname}, which is not extracted"
+                )
         else:
             raise Error(
                 f"Archive contains {member.name} of unsupported type {member.type!r}"
@@ -576,8 +523,8 @@ class _Extractor:
             d = child
         return d
 
-    def _copy(self, source: List[str], dest: List[str]) -> bool:
-        """Copy an extracted file or dir to dest, and return whether it was extracted."""
+    def _copy(self, source: List[str], dest: List[str], link: bool = False) -> bool:
+        """Hardlink or copy an extracted entry to dest, and return whether it was extracted."""
         try:
             source_parent = self._open_chain(source[:-1])
         except (FileNotFoundError, Error):
@@ -588,28 +535,31 @@ class _Extractor:
                 s = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
             except FileNotFoundError:
                 return False
-            parent = self._dir(dest[:-1])
             if stat.S_ISDIR(s.st_mode):
-                self._mkdir(parent, dest[-1])
+                self._dir(dest)
                 return True
+            parent = self._dir(dest[:-1])
+            if link:
+                dest_path, dest_fd = _at(parent, dest[-1])
+                try:
+                    os.link(
+                        path,
+                        dest_path,
+                        src_dir_fd=dir_fd,
+                        dst_dir_fd=dest_fd,
+                        follow_symlinks=False,
+                    )
+                    return True
+                except FileExistsError:
+                    raise
+                except OSError:
+                    pass  # like tarfile, copy where hardlinks are not supported
             if not stat.S_ISREG(s.st_mode):
                 return False
-            mode = stat.S_IMODE(s.st_mode)
-            dest_path, dest_fd = _at(parent, dest[-1])
-            src = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0), dir_fd=dir_fd)
+            src = os.open(path, os.O_RDONLY | _O_BINARY, dir_fd=dir_fd)
             try:
-                dst = os.open(dest_path, _FILE_FLAGS, mode, dir_fd=dest_fd)
-                try:
-                    while True:
-                        data = os.read(src, _CHUNK)
-                        if not data:
-                            break
-                        chunk = memoryview(data)
-                        while chunk:
-                            chunk = chunk[os.write(dst, chunk) :]
-                    self._attrs(dst, mode, self.chmod_files)
-                finally:
-                    os.close(dst)
+                chunks = iter(lambda: os.read(src, _CHUNK), b"")
+                self._file(parent, dest[-1], stat.S_IMODE(s.st_mode), chunks)
             finally:
                 os.close(src)
             return True
@@ -663,10 +613,9 @@ def extract(
     if gid is not None and _WINDOWS:
         raise ValueError("gid is not supported on Windows")
     os.makedirs(dest, exist_ok=True)
-    extractor = _Extractor(dest, file_mode, dir_mode, gid)
-    extractor.marker_name = root_marker
+    extractor = _Extractor(dest, root_marker, file_mode, dir_mode, gid)
     try:
-        with open_archive(src) as stream:
+        with _open_archive(src) as stream:
             reader = TarReader(stream)
             for member in reader:
                 extractor.add(member, reader)
