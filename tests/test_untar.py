@@ -362,6 +362,61 @@ def test_open_dirs_are_bounded(tmp_path, monkeypatch):
     assert not fds.open
 
 
+@pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")
+@pytest.mark.parametrize("max_open_dirs", [3, 64])
+@pytest.mark.parametrize("valid", [True, False])
+def test_tmp_is_removed(tmp_path, monkeypatch, valid, max_open_dirs):
+    """tmp is removed, also below a prefix deeper than the open dirs. After a successful
+    extraction whose dirs leading up to the root are all open, only rmdirs are needed."""
+    monkeypatch.setattr(untar, "_MAX_OPEN_DIRS", max_open_dirs)
+    prefix = "/".join("abcdefghijkl")
+    members = [
+        (f"{prefix}/.spack", "d", None, 0o755),
+        (f"{prefix}/x/y/f", "f", b"f", 0o644),
+        (f"{prefix}/x/y/l", "s", "/", 0o777),
+    ]
+    if not valid:
+        members.append(("../escape", "f", b"", 0o644))
+    dest = tmp_path / "dest"
+    walks = []
+    remove_tmp = untar._Extractor._remove_tmp
+    monkeypatch.setattr(
+        untar._Extractor,
+        "_remove_tmp",
+        lambda self: walks.append(1) or remove_tmp(self),
+    )
+    fds = FdCounter(monkeypatch)
+    if valid:
+        root = untar.extract(
+            io.BytesIO(make_tar(members)), str(dest), root_marker=".spack"
+        )
+        assert root == prefix
+    else:
+        with pytest.raises(untar.Error, match="unsafe path"):
+            untar.extract(
+                io.BytesIO(make_tar(members)), str(dest), root_marker=".spack"
+            )
+    assert sorted(os.listdir(dest)) == ([".spack", "x"] if valid else [])
+    assert len(walks) == (0 if valid and max_open_dirs > 12 else 1)
+    # dest, tmp, the open dirs, and a dir or file being opened from the last of them
+    assert fds.peak <= 2 + min(max_open_dirs, 14) + 2
+    assert not fds.open
+
+
+@pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")
+def test_deep_tmp_is_removed_in_linear_time(tmp_path, monkeypatch):
+    """Removing tmp opens each dir once, also far below the open dirs."""
+    monkeypatch.setattr(untar, "_MAX_OPEN_DIRS", 3)
+    depth = 1000
+    members = [("d/" * depth + "f", "f", b"", 0o644), ("../escape", "f", b"", 0o644)]
+    fds = FdCounter(monkeypatch)
+    with pytest.raises(untar.Error, match="unsafe path"):
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "dest"))
+    assert os.listdir(tmp_path / "dest") == []
+    # Extraction opens each dir once, and so does removal
+    assert fds.opens < 2 * depth + 10
+
+
 def test_no_overwrites(tmp_path):
     members = [("file", "f", b"first", 0o644), ("file", "f", b"second", 0o644)]
     with pytest.raises(FileExistsError):
