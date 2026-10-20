@@ -378,6 +378,11 @@ def test_tmp_is_removed(tmp_path, monkeypatch, valid):
     if not valid:
         members.append(("../escape", "f", b"", 0o644))
     dest = tmp_path / "dest"
+    walked = []
+    remove_files = untar._remove_files
+    monkeypatch.setattr(
+        untar, "_remove_files", lambda d: walked.append(remove_files(d)) or walked[-1]
+    )
     fds = FdCounter(monkeypatch)
     if valid:
         root = untar.extract(
@@ -390,6 +395,9 @@ def test_tmp_is_removed(tmp_path, monkeypatch, valid):
                 io.BytesIO(make_tar(members)), str(dest), root_marker=".spack"
             )
     assert sorted(os.listdir(dest)) == ([".spack", "x"] if valid else [])
+    if valid:
+        # finish removed the dirs leading up to the root, so tmp was empty
+        assert walked == [[]]
     assert fds.peak <= 2 + 3 + 2
     assert not fds.open
 

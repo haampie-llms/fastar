@@ -828,6 +828,12 @@ class _Extractor:
             path, dir_fd = _at(src, name)
             new_path, new_dir_fd = _at(self.dest, name)
             os.rename(path, new_path, src_dir_fd=dir_fd, dst_dir_fd=new_dir_fd)
+
+        # Left in tmp are only the dirs leading up to the root, which are empty now
+        for i in range(len(root), 0, -1):
+            path, dir_fd = _at(self._dir(root[: i - 1]), root[i - 1])
+            with contextlib.suppress(OSError):
+                os.rmdir(path, dir_fd=dir_fd)
         return "/".join(root)
 
 
