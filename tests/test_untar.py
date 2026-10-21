@@ -1,6 +1,7 @@
 import collections
 import errno
 import gzip
+import importlib.util
 import io
 import os
 import random
@@ -441,6 +442,26 @@ def test_dest_symlink(tmp_path):
     tarfile_extract(make_tar(SAMPLE), tmp_path / "expected")
     assert (tmp_path / "link").is_symlink()
     assert snapshot(tmp_path / "real") == snapshot(tmp_path / "expected")
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="POSIX")
+def test_dir_fd_where_supported():
+    """Otherwise the tests that need dir file descriptors are silently skipped."""
+    assert untar._DIR_FD
+
+
+@pytest.mark.parametrize(
+    "supports",
+    ["supports_dir_fd", "supports_follow_symlinks"],
+)
+def test_dir_fd_needs_every_call(monkeypatch, supports):
+    """Without dir_fd or follow_symlinks support for a single call, entries are created by
+    path, instead of failing with NotImplementedError halfway through an archive."""
+    monkeypatch.setattr(os, supports, getattr(os, supports) - {os.stat})
+    spec = importlib.util.spec_from_file_location("untar_copy", untar.__file__)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert not module._DIR_FD
 
 
 def test_no_overwrites(tmp_path):
