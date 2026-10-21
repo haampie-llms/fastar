@@ -625,8 +625,8 @@ class _Extractor:
         self.marker_name = root_marker
         #: The shallowest member with the marker name
         self.marker: Optional[List[str]] = None
-        #: Symlinks that could not be created, to be copies of targets extracted later
-        self.links: List[Tuple[List[str], List[str]]] = []
+        #: Symlinks that could not be created, to their targets: copied once extracted
+        self.links: Dict[Tuple[str, ...], Tuple[str, ...]] = {}
         #: The names of the dirs below tmp that lead to the current member
         self.names: List[str] = []
         #: The deepest of those dirs, at most _MAX_OPEN_DIRS, which are open
@@ -839,7 +839,9 @@ class _Extractor:
                 # Like tarfile, copy the target instead where symlinks are not supported.
                 target = _resolve(parts, member.linkname)
                 if target is not None and not self._copy(target, parts):
-                    self.links.append((target, parts))
+                    if tuple(parts) in self.links:
+                        raise Error(f"Archive contains {member.name} twice")
+                    self.links[tuple(parts)] = tuple(target)
                 return
             if self.chown:
                 os.chown(path, -1, self.gid, dir_fd=dir_fd, follow_symlinks=False)  # type: ignore
@@ -930,8 +932,14 @@ class _Extractor:
         if self.root[: len(root)] != root:
             raise Error(f"Archive contains members outside of {'/'.join(root) or '.'}")
 
-        for source, dest in self.links:
-            self._copy(source, dest)
+        # Copy a link to a link after that one, in time linear in the number of links
+        while self.links:
+            chain = [self.links.popitem()]
+            while chain[-1][1] in self.links:
+                link = chain[-1][1]
+                chain.append((link, self.links.pop(link)))
+            for link, target in reversed(chain):
+                self._copy(list(target), list(link))
 
         src = self._dir(root)
         names = os.listdir(src)
