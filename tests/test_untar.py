@@ -432,6 +432,17 @@ def test_dest_dir_fd(tmp_path):
     assert snapshot(tmp_path / "b") == snapshot(tmp_path / "expected")
 
 
+@needs_symlinks
+def test_dest_symlink(tmp_path):
+    """dest may be a symlink to a dir: the caller chose it, unlike symlinks in the archive."""
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to("real")
+    untar.extract(io.BytesIO(make_tar(SAMPLE)), str(tmp_path / "link"))
+    tarfile_extract(make_tar(SAMPLE), tmp_path / "expected")
+    assert (tmp_path / "link").is_symlink()
+    assert snapshot(tmp_path / "real") == snapshot(tmp_path / "expected")
+
+
 def test_no_overwrites(tmp_path):
     members = [("file", "f", b"first", 0o644), ("file", "f", b"second", 0o644)]
     with pytest.raises(FileExistsError):
