@@ -456,8 +456,17 @@ def test_listed_twice(tmp_path):
     assert snapshot(tmp_path / "actual") == snapshot(tmp_path / "expected")
 
 
+def is_gnu_tar() -> bool:
+    if shutil.which("tar") is None:
+        return False
+    version = subprocess.run(["tar", "--version"], stdout=subprocess.PIPE, check=False)
+    return b"GNU tar" in version.stdout
+
+
 @needs_symlinks
-@pytest.mark.skipif(shutil.which("tar") is None, reason="needs tar")
+@pytest.mark.skipif(
+    not is_gnu_tar(), reason="bsdtar archives a symlink twice as a symlink"
+)
 @pytest.mark.parametrize("format", ["gnu", "posix"])
 def test_listed_twice_by_tar(tmp_path, format):
     """Like GNU tar's link04 test: tar cf archive dir dir"""
