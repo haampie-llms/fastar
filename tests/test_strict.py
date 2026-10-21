@@ -26,8 +26,14 @@ def header(name="f", type=b"0", size=b"", linkname="", magic=b"ustar\x0000", pre
     h[157 : 157 + len(linkname.encode())] = linkname.encode()
     h[257:265] = magic
     h[345 : 345 + len(prefix.encode())] = prefix.encode()
+    return checksum(h)
+
+
+def checksum(h: bytearray, field=lambda total: b"%06o\0 " % total) -> bytes:
+    """The header h with the checksum field(total) of its bytes."""
+    h = bytearray(h)
     h[148:156] = b" " * 8
-    h[148:156] = b"%06o\0 " % sum(h)
+    h[148:156] = field(sum(h))
     return bytes(h)
 
 
@@ -84,6 +90,26 @@ def test_invalid_octal_numbers(tmp_path, size):
 
 
 @pytest.mark.parametrize(
+    "size",
+    [
+        b"\x0000000002000",
+        b" \x000000002000",
+        b"\n0000002000",
+        b"\t0000002000",
+        b"\x0b0000002000",
+        b"1\x00777",
+        b"2000\x00X",
+    ],
+)
+def test_octal_numbers_with_odd_padding(size):
+    """Readers disagree on the size of a member, and so on where the next header is: some
+    skip a leading NUL or whitespace other than spaces, others stop there, and some read
+    the digits after a NUL."""
+    with pytest.raises(untar.Error, match="invalid number"):
+        members(header(size=size) + member("hidden", bytes(1024)) + EOF)
+
+
+@pytest.mark.parametrize(
     "size", ["", "abc", "-1536", "1_0", "+3", " 3", "٣", "0x3", "3.0"]
 )
 def test_invalid_pax_sizes(tmp_path, size):
@@ -98,9 +124,36 @@ def test_valid_numbers():
         b"3 ",
         b"00000000003",
         b"3\0   ",
+        b"3\0 \0 ",
         b"\x80" + (3).to_bytes(11, "big"),
     ]:
         assert members(header(size=size) + data(b"abc") + EOF) == [("f", "", 3)]
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        lambda total: b"\x80" + total.to_bytes(7, "big"),
+        lambda total: b"%06o\0X" % total,
+        lambda total: b"\t%06o\0" % total,
+    ],
+    ids=["base-256", "garbage", "tab"],
+)
+def test_odd_checksums(field):
+    """Readers that refuse a checksum skip to the next block that is a valid header, which
+    may be in the data of this member."""
+    archive = checksum(header("f", size=1024), field) + member("hidden", bytes(1024))
+    with pytest.raises(untar.Error, match="invalid number"):
+        members(archive + EOF)
+
+
+@pytest.mark.parametrize(
+    "format", [b"%06o\0 ", b"%06o \0", b"%07o\0", b"%08o", b" %06o\0"]
+)
+def test_checksum_variants(format):
+    """Space or NUL terminated, unterminated, and with leading spaces."""
+    h = checksum(header("f", size=3), lambda total: format % total)
+    assert members(h + data(b"abc") + EOF) == [("f", "", 3)]
 
 
 # Pax records
