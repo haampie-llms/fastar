@@ -413,6 +413,13 @@ def test_sparse_pax_keys(tmp_path, key, value):
     rejects(archive, tmp_path, "sparse")
 
 
+def test_contiguous_files(tmp_path):
+    """Type 7 has data for most readers, but not for all."""
+    archive = member("f", b"x" * 1024, type=b"7") + member("after", b"y") + EOF
+    assert [name for name, _, _ in members(archive)] == ["f", "after"]
+    rejects(archive, tmp_path, "unsupported type")
+
+
 # gzip
 
 

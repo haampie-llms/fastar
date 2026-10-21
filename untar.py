@@ -25,7 +25,6 @@ AREGTYPE = b"\0"
 LNKTYPE = b"1"
 SYMTYPE = b"2"
 DIRTYPE = b"5"
-CONTTYPE = b"7"
 _PAX_HEADER = b"x"
 _SOLARIS_PAX_HEADER = b"X"
 _PAX_GLOBAL_HEADER = b"g"
@@ -38,7 +37,8 @@ _EXTENDED = (
     _GNU_LONGNAME,
     _GNU_LONGLINK,
 )
-_DATA_TYPES = (REGTYPE, AREGTYPE, CONTTYPE)
+#: Not contiguous files (7), which some readers read without data
+_DATA_TYPES = (REGTYPE, AREGTYPE)
 #: Like tarfile, members of other types than these have data, also unknown ones
 _NO_DATA_TYPES = (LNKTYPE, SYMTYPE, DIRTYPE, b"3", b"4", b"6")
 
