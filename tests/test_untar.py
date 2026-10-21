@@ -595,6 +595,8 @@ def test_end_of_archive_marker(tmp_path, archive, error):
         gzip.compress(TWO_MEMBERS + bytes(1024))
         + gzip.compress(TWO_MEMBERS + bytes(1024)),
     ],
+    # Not the archives, which are too long for an environment variable on Windows
+    ids=["two archives", "data after 2 MiB of zeros", "two gzip files"],
 )
 def test_data_after_end_of_archive_marker(tmp_path, archive):
     """Every reader ignores it, so a second archive after the first would go unnoticed."""
