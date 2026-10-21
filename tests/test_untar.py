@@ -261,7 +261,12 @@ def test_unsafe_names(tmp_path, name):
 def test_names_of_dots(tmp_path, name):
     """Only . and .. are special."""
     untar.extract(io.BytesIO(make_tar([(name, "f", b"x", 0o644)])), str(tmp_path))
-    assert (tmp_path / name).read_bytes() == b"x"
+    path = str(tmp_path / name)
+    if sys.platform == "win32":
+        # Like untar, by extended-length path: other paths drop trailing dots on Windows
+        path = "\\\\?\\" + path
+    with open(path, "rb") as f:
+        assert f.read() == b"x"
 
 
 @needs_symlinks
