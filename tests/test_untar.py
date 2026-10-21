@@ -495,6 +495,34 @@ def test_truncated(tmp_path):
         untar.extract(io.BytesIO(data[:2000]), str(tmp_path))
 
 
+TWO_MEMBERS = make_tar(
+    [("a", "f", b"a", 0o644), ("b", "f", b"b", 0o644)], tarfile.USTAR_FORMAT
+)[: 4 * 512]
+
+
+@pytest.mark.parametrize(
+    "archive,error",
+    [
+        (TWO_MEMBERS, "truncated"),
+        (TWO_MEMBERS[:1024], "truncated"),
+        (TWO_MEMBERS + bytes(512), "truncated"),
+        (
+            TWO_MEMBERS[:1024] + bytes(512) + TWO_MEMBERS[1024:] + bytes(1024),
+            "lone zero block",
+        ),
+        (b"", "empty"),
+        (gzip.compress(b""), "empty"),
+    ],
+)
+def test_end_of_archive_marker(tmp_path, archive, error):
+    """Without two zero blocks at the end, truncation between members would go unnoticed."""
+    with pytest.raises(untar.Error, match=error):
+        untar.extract(io.BytesIO(archive), str(tmp_path / "d"))
+    assert os.listdir(tmp_path / "d") == []
+    untar.extract(io.BytesIO(TWO_MEMBERS + bytes(1024)), str(tmp_path / "d"))
+    assert sorted(os.listdir(tmp_path / "d")) == ["a", "b"]
+
+
 @needs_symlinks
 def test_fuzz(tmp_path):
     """Corrupt archives fail with an error or extract something, but never write outside."""
