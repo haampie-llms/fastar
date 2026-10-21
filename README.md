@@ -22,6 +22,65 @@ $ python -m untar pkg.tar.gz /opt/pkg
 Unlike tar, the destination is created if it does not exist, and an archive with an entry that
 already exists there is an error, which exits with status 2.
 
+### Decompressing in a thread
+
+untar decompresses and extracts one after the other, in one thread, while `tar xzf` and
+`gzip -d | tar xf -` decompress in another process at the same time. In Python, a thread can do
+the same, since decompression and writes to a pipe release the GIL:
+
+```python
+import gzip
+import os
+import shutil
+import threading
+
+import untar
+
+
+class Gunzip:
+    """Decompress a gzip file in a thread, and read the result from a pipe."""
+
+    def __init__(self, path):
+        r, w = os.pipe()
+        self.pipe = open(r, "rb", buffering=0)
+        self.error = None
+        self.thread = threading.Thread(target=self._decompress, args=(path, w))
+        self.thread.start()
+
+    def _decompress(self, path, w):
+        try:
+            # Writes block while the pipe is full, so decompression stays at most a pipe
+            # buffer ahead of extraction
+            with open(w, "wb") as out, gzip.open(path) as f:
+                shutil.copyfileobj(f, out, 64 * 1024)
+        except Exception as e:
+            self.error = e
+
+    def read(self, size):
+        data = self.pipe.read(size)
+        if not data:
+            # The end of the pipe: wait until the gzip checksum is verified
+            self.thread.join()
+            if self.error:
+                raise self.error
+        return data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        # If extraction stopped early, a blocked write then fails, and the thread ends
+        self.pipe.close()
+        self.thread.join()
+
+
+with Gunzip("pkg.tar.gz") as stream:
+    untar.extract(stream, "/opt/pkg")
+```
+
+untar reads the stream to its end before it moves anything into the destination, so an archive
+with a bad gzip checksum still extracts nothing.
+
 ## Scope
 
 untar is for installing software from archives, not for restoring backups. Owners, groups,
