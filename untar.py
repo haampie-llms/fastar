@@ -52,6 +52,13 @@ _MAX_EXTENDED = 1024 * 1024
 #: Dirs on the stack that stay open: the deepest ones, and shallower ones are reopened if needed
 _MAX_OPEN_DIRS = 64
 _BadGzipFile = getattr(gzip, "BadGzipFile", OSError)
+#: Like Linux, the most symlinks followed to resolve one path
+_MAX_SYMLINKS = 40
+
+try:
+    from _winapi import CreateJunction as _create_junction  # type: ignore
+except ImportError:
+    _create_junction = None
 
 
 class Error(ValueError):
@@ -394,18 +401,29 @@ def _parts(name: str) -> List[str]:
     return parts
 
 
-def _resolve(parts: List[str], linkname: str) -> Optional[List[str]]:
-    """The member a relative symlink at parts points to, or None if it points outside."""
-    if linkname.startswith("/"):
-        return None
+def _resolve(
+    links: Dict[Tuple[str, ...], str], parts: List[str]
+) -> Optional[List[str]]:
+    """The member that the symlink at parts points to, following the symlinks in links like
+    the operating system would. None if it points outside the archive, or loops."""
     target = parts[:-1]
-    for part in linkname.split("/"):
-        if part == "..":
+    todo = links[tuple(parts)].split("/")[::-1]
+    followed = 1
+    while todo:
+        name = todo.pop()
+        if name == "..":
             if not target:
                 return None
-            target = target[:-1]
-        elif part and part != ".":
-            target = target + [part]
+            target.pop()
+        elif name and name != ".":
+            target.append(name)
+            linkname = links.get(tuple(target))
+            if linkname is not None:
+                followed += 1
+                if followed > _MAX_SYMLINKS or linkname.startswith("/"):
+                    return None
+                target.pop()
+                todo.extend(linkname.split("/")[::-1])
     return target
 
 
@@ -532,8 +550,9 @@ class _Extractor:
         self.marker_name = root_marker
         #: The shallowest member with the marker name
         self.marker: Optional[List[str]] = None
-        #: Symlinks that could not be created, to be copies of targets extracted later
-        self.links: List[Tuple[List[str], List[str]]] = []
+        #: Symlinks that could not be created, by name, with their targets. Each is an empty
+        #: file, which finish() replaces.
+        self.links: Dict[Tuple[str, ...], str] = {}
         #: The names of the dirs below tmp that lead to the current member
         self.names: List[str] = []
         #: The deepest of those dirs, at most _MAX_OPEN_DIRS, which are open
@@ -736,10 +755,7 @@ class _Extractor:
             except OSError as e:
                 if not _unsupported(e):
                     raise
-                # Like tarfile, copy the target instead where symlinks are not supported.
-                target = _resolve(parts, member.linkname)
-                if target is not None and not self._copy(target, parts):
-                    self.links.append((target, parts))
+                self._defer(parent, parts, member.linkname)
                 return
             if self.chown:
                 os.chown(path, -1, self.gid, dir_fd=dir_fd, follow_symlinks=False)  # type: ignore
@@ -747,11 +763,12 @@ class _Extractor:
             target = _parts(member.linkname)
             if target == parts and _exists_not_dir(parent, parts[-1]):
                 return  # tar archives an entry listed twice as a hardlink to itself
-            if (
-                not target
-                or target == parts
-                or not self._copy(target, parts, link=True)
-            ):
+            linkname = self.links.get(tuple(target))
+            if linkname is not None:
+                # A hardlink to a symlink is a symlink with the same target
+                self._defer(parent, parts, linkname)
+                return
+            if not target or target == parts or not self._link(target, parts):
                 raise Error(
                     f"Archive hardlinks {member.linkname}, which is not extracted"
                 )
@@ -759,6 +776,23 @@ class _Extractor:
             raise Error(
                 f"Archive contains {member.name} of unsupported type {member.type!r}"
             )
+
+    def _defer(self, parent: Dir, parts: List[str], linkname: str) -> None:
+        """Where symlinks are not supported, reserve the name of one with an empty file, so that
+        nothing is written through or over it. finish() replaces it."""
+        if linkname.startswith("/"):
+            raise self._unsupported_symlink(parts, linkname)
+        path, dir_fd = _at(parent, parts[-1])
+        os.close(os.open(path, _FILE_FLAGS, 0o600, dir_fd=dir_fd))
+        self.links[tuple(parts)] = linkname
+
+    @staticmethod
+    def _unsupported_symlink(parts: List[str], linkname: str) -> Error:
+        dirs = " or directory" if _create_junction else ""
+        return Error(
+            f"Archive contains symlink {'/'.join(parts)} to {linkname}, but symlinks are not "
+            f"supported here, and it does not point to a file{dirs} in the archive"
+        )
 
     def _open_existing(self, parts: List[str]) -> Tuple[Dir, bool]:
         """Open tmp/parts without creating anything, from the deepest dir on the stack that
@@ -774,8 +808,9 @@ class _Extractor:
             d, owned = child, True
         return d, owned
 
-    def _copy(self, source: List[str], dest: List[str], link: bool = False) -> bool:
-        """Hardlink or copy an extracted entry to dest, and return whether it was extracted."""
+    def _link(self, source: List[str], dest: List[str]) -> bool:
+        """Hardlink an extracted entry to dest, or copy it where hardlinks are not supported,
+        and return whether it was extracted."""
         if not source:
             return False
         # Open dest's parent first, since that may close dirs on the stack that source reuses.
@@ -791,27 +826,23 @@ class _Extractor:
             except FileNotFoundError:
                 return False
             if stat.S_ISDIR(s.st_mode):
-                if link:
-                    raise Error(
-                        f"Archive hardlinks {'/'.join(source)}, which is a directory"
-                    )
-                self._dir(dest)
+                raise Error(
+                    f"Archive hardlinks {'/'.join(source)}, which is a directory"
+                )
+            dest_path, dest_fd = _at(parent, dest[-1])
+            try:
+                os.link(
+                    path,
+                    dest_path,
+                    src_dir_fd=dir_fd,
+                    dst_dir_fd=dest_fd,
+                    follow_symlinks=False,
+                )
                 return True
-            if link:
-                dest_path, dest_fd = _at(parent, dest[-1])
-                try:
-                    os.link(
-                        path,
-                        dest_path,
-                        src_dir_fd=dir_fd,
-                        dst_dir_fd=dest_fd,
-                        follow_symlinks=False,
-                    )
-                    return True
-                except OSError as e:
-                    if not _unsupported(e):
-                        raise
-                    # Like tarfile, copy where hardlinks are not supported
+            except OSError as e:
+                if not _unsupported(e):
+                    raise
+                # Like tarfile, copy where hardlinks are not supported
             if not stat.S_ISREG(s.st_mode):
                 return False
             src = os.open(path, os.O_RDONLY | _O_BINARY, dir_fd=dir_fd)
@@ -825,6 +856,47 @@ class _Extractor:
             if owned:
                 _close(source_parent)
 
+    def _mode(self, parts: List[str]) -> int:
+        """The mode of tmp/parts, without following symlinks, or 0 if it is not extracted."""
+        if not parts:
+            return stat.S_IFDIR
+        try:
+            parent, owned = self._open_existing(parts[:-1])
+        except (FileNotFoundError, Error):
+            return 0
+        try:
+            path, dir_fd = _at(parent, parts[-1])
+            return os.stat(path, dir_fd=dir_fd, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return 0
+        finally:
+            if owned:
+                _close(parent)
+
+    def _replace_links(self, root: List[str]) -> List[Tuple[List[str], List[str]]]:
+        """Replace the symlinks that could not be created: those to files in the archive with
+        hardlinks. Returns those to dirs in root, relative to root, to become junctions."""
+        junctions = []
+        for name in self.links:
+            parts = list(name)
+            target = _resolve(self.links, parts)
+            mode = 0 if target is None else self._mode(target)
+            if target is not None and stat.S_ISREG(mode):
+                parent = self._dir(parts[:-1])
+                path, dir_fd = _at(parent, parts[-1])
+                os.unlink(path, dir_fd=dir_fd)
+                self._link(target, parts)
+            elif (
+                target is not None
+                and stat.S_ISDIR(mode)
+                and _create_junction
+                and target[: len(root)] == root
+            ):
+                junctions.append((parts[len(root) :], target[len(root) :]))
+            else:
+                raise self._unsupported_symlink(parts, self.links[name])
+        return junctions
+
     def finish(self) -> str:
         """Move the contents of the final root into dest, and return its archive name."""
         root: List[str] = []
@@ -835,8 +907,7 @@ class _Extractor:
         if self.root[: len(root)] != root:
             raise Error(f"Archive contains members outside of {'/'.join(root) or '.'}")
 
-        for source, dest in self.links:
-            self._copy(source, dest)
+        junctions = self._replace_links(root)
 
         src = self._dir(root)
         names = os.listdir(src)
@@ -851,6 +922,16 @@ class _Extractor:
             path, dir_fd = _at(src, name)
             new_path, new_dir_fd = _at(self.dest, name)
             os.rename(path, new_path, src_dir_fd=dir_fd, dst_dir_fd=new_dir_fd)
+        # Junctions are absolute, so they are made where they end up. Only Windows has them,
+        # where dest is a path.
+        for link, target in junctions:
+            path = os.path.join(str(self.dest), *link)
+            os.unlink(path)
+            # CreateJunction puts \??\ before the full path of the target: it cannot be \\?\
+            target_path = os.path.join(str(self.dest), *target)
+            if target_path.startswith("\\\\?\\"):
+                target_path = target_path[4:]
+            _create_junction(target_path, path)
         return "/".join(root)
 
 
@@ -877,8 +958,10 @@ def extract(
     Files are created with ``file_mode``, without executable bits if the member is not
     executable by its owner, and dirs with ``dir_mode``; with ``gid``, both get that group.
     Timestamps and ownership in the archive are not restored. Members must be regular files,
-    dirs, symlinks or hardlinks, and cannot be absolute or contain ``..``. Where links cannot
-    be created, their targets are copied."""
+    dirs, symlinks or hardlinks, and cannot be absolute or contain ``..``. Where symlinks
+    cannot be created, one to a file in the archive becomes a hardlink to it, one to a dir in
+    the archive a junction on Windows, and others are an error. Where hardlinks cannot be
+    created, their targets are copied."""
     if gid is not None and _WINDOWS:
         raise ValueError("gid is not supported on Windows")
     extractor = _Extractor(dest, root_marker, file_mode, dir_mode, gid)

@@ -31,6 +31,10 @@ restore them: files are created with `file_mode` (without executable bits where 
 has none for the owner), dirs with `dir_mode`, optionally with group `gid`, and only regular
 files, dirs, symlinks and hardlinks are extracted.
 
+Where symlinks cannot be created, as on Windows without Developer Mode, a symlink to a file in
+the archive becomes a hardlink to it, a symlink to a dir in the archive becomes a junction on
+Windows, and any other symlink is an error. Nothing outside the archive is linked or copied.
+
 ## Features
 
 - **One pass.** The archive is read front to back once, without seeking, from a file, pipe or

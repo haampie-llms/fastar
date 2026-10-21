@@ -703,27 +703,121 @@ def test_gid(tmp_path):
 # Where links are not supported
 
 
-@pytest.mark.parametrize("target_first", [False, True])
-def test_links_are_copied_where_unsupported(tmp_path, monkeypatch, target_first):
+def no_links(monkeypatch, hardlinks=True):
     def fail(*args, **kwargs):
         raise OSError(errno.EPERM, "links are not supported")
 
     monkeypatch.setattr(os, "symlink", fail)
-    monkeypatch.setattr(os, "link", fail)
+    if not hardlinks:
+        monkeypatch.setattr(os, "link", fail)
+
+
+@pytest.mark.parametrize("target_first", [False, True])
+@pytest.mark.parametrize("hardlinks", [False, True])
+def test_symlinks_to_files_where_unsupported(
+    tmp_path, monkeypatch, target_first, hardlinks
+):
+    """Where symlinks cannot be created, those to files in the archive become hardlinks, or
+    copies where hardlinks cannot be created either."""
+    no_links(monkeypatch, hardlinks)
     target = [("lib/libfoo.so.1", "f", b"foo", 0o644)]
     links = [
         ("lib/libfoo.so", "s", "libfoo.so.1", 0o777),
-        ("lib/sub", "s", "../lib", 0o777),
+        ("lib/libfoo.so.0", "s", "./libfoo.so", 0o777),
+        ("lib/sub/libfoo.so", "s", "../libfoo.so.0", 0o777),
+        ("lib/sub/libfoo.a", "h", "lib/sub/libfoo.so", 0o777),
+        ("lib/libfoo.so", "h", "lib/libfoo.so", 0o777),
     ]
-    members = [("lib", "d", None, 0o755)] + (
+    members = [("lib", "d", None, 0o755), ("lib/sub", "d", None, 0o755)] + (
         target + links if target_first else links + target
     )
-    members.append(("lib/libfoo.a", "h", "lib/libfoo.so.1", 0o644))
     untar.extract(io.BytesIO(make_tar(members)), str(tmp_path))
-    for name in ("libfoo.so", "libfoo.so.1", "libfoo.a"):
+    inode = os.stat(tmp_path / "lib" / "libfoo.so.1").st_ino
+    for name in ("libfoo.so", "libfoo.so.0", "sub/libfoo.so", "sub/libfoo.a"):
         path = tmp_path / "lib" / name
         assert not path.is_symlink() and path.read_bytes() == b"foo"
-    assert (tmp_path / "lib" / "sub").is_dir()
+        assert (os.stat(path).st_ino == inode) == hardlinks
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        [("abs", "s", "/usr/bin/env", 0o777)],
+        [("up", "s", "../outside", 0o777)],
+        [("missing", "s", "missing", 0o777)],
+        [("a", "s", "b", 0o777), ("b", "s", "a", 0o777)],
+        [("self", "s", "self", 0o777)],
+        [("f", "f", b"", 0o644), ("g", "s", "f/x", 0o777)],
+    ],
+)
+def test_other_symlinks_where_unsupported(tmp_path, monkeypatch, members):
+    """Other symlinks are an error, also where hardlinks or copies could be made."""
+    (tmp_path / "outside").write_bytes(b"secret")
+    no_links(monkeypatch)
+    with pytest.raises(untar.Error, match="symlinks are not supported"):
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "dest"))
+    assert os.listdir(tmp_path / "dest") == []
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        [("link", "s", "dir", 0o777), ("link/f", "f", b"", 0o644)],
+        [("link", "s", "dir", 0o777), ("link", "f", b"", 0o644)],
+        [("link", "s", "dir", 0o777), ("link", "d", None, 0o755)],
+    ],
+)
+def test_nothing_over_symlinks_where_unsupported(tmp_path, monkeypatch, members):
+    no_links(monkeypatch)
+    with pytest.raises((untar.Error, FileExistsError)):
+        untar.extract(
+            io.BytesIO(make_tar([("dir", "d", None, 0o755)] + members)),
+            str(tmp_path / "dest"),
+        )
+    assert os.listdir(tmp_path / "dest") == []
+
+
+DIR_LINKS = [
+    ("pkg", "d", None, 0o755),
+    ("pkg/.meta", "f", b"", 0o644),
+    ("pkg/lib", "d", None, 0o755),
+    ("pkg/lib/libfoo.so", "f", b"foo", 0o644),
+    ("pkg/lib64", "s", "lib", 0o777),
+    ("pkg/bin", "d", None, 0o755),
+    ("pkg/bin/libfoo.so", "s", "../lib64/libfoo.so", 0o777),
+    ("pkg/bin/pkg", "s", "..", 0o777),
+]
+
+
+@pytest.mark.parametrize("root_marker", [None, ".meta"])
+def test_symlinks_to_dirs_where_unsupported(tmp_path, monkeypatch, root_marker):
+    """Where symlinks cannot be created, those to dirs in what is extracted become junctions
+    on Windows, and are an error elsewhere."""
+    no_links(monkeypatch)
+    dest = tmp_path / "dest"
+    if sys.platform != "win32":
+        with pytest.raises(untar.Error, match="symlinks are not supported"):
+            untar.extract(
+                io.BytesIO(make_tar(DIR_LINKS)), str(dest), root_marker=root_marker
+            )
+        assert os.listdir(dest) == []
+        return
+    untar.extract(io.BytesIO(make_tar(DIR_LINKS)), str(dest), root_marker=root_marker)
+    pkg = dest if root_marker else dest / "pkg"
+    for junction in (pkg / "lib64", pkg / "bin" / "pkg"):
+        assert os.path.isjunction(junction)
+    assert os.listdir(pkg / "lib64") == ["libfoo.so"]
+    assert sorted(os.listdir(pkg / "bin" / "pkg")) == sorted(os.listdir(pkg))
+    assert (pkg / "bin" / "libfoo.so").read_bytes() == b"foo"
+
+
+def test_symlinks_outside_the_root_where_unsupported(tmp_path, monkeypatch):
+    """A junction to a dir that is not extracted is an error, also on Windows."""
+    no_links(monkeypatch)
+    members = DIR_LINKS[:2] + [("pkg/up", "s", "..", 0o777)]
+    with pytest.raises(untar.Error, match="symlinks are not supported"):
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path), root_marker=".meta")
+    assert os.listdir(tmp_path) == []
 
 
 def test_solaris_extended_header(tmp_path):
