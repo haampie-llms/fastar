@@ -173,7 +173,8 @@ class TarReader:
     """Reads the members of a tar archive front to back from a binary stream, without seeking.
 
     Parses ustar headers, pax extended headers and GNU long names, and verifies header
-    checksums and the end-of-archive marker. Iterate for members, and read the data of the current regular file with
+    checksums, the end-of-archive marker, and that only zeros follow it, up to the end of the
+    stream. Iterate for members, and read the data of the current regular file with
     ``chunks()``; data that is not read is skipped."""
 
     def __init__(self, stream: IO[bytes]) -> None:
@@ -204,6 +205,17 @@ class TarReader:
         pos = self.pos
         self.pos = pos + size
         return self.buf[pos : pos + size]
+
+    def _end(self) -> None:
+        """Read the rest of the stream, after the end-of-archive marker. Writers pad it with
+        zeros, and anything else, like a second archive, would be ignored by every reader."""
+        rest = self.buf[self.pos :]
+        self.buf, self.pos = b"", 0
+        while not rest.strip(b"\0"):
+            rest = self.stream.read(_BUF)
+            if not rest:
+                return
+        raise Error("Archive contains data after the end-of-archive marker")
 
     def _header(self) -> Optional[bytes]:
         """The next header, or None at the end-of-archive marker."""
@@ -261,6 +273,7 @@ class TarReader:
                 if header is None:
                     if seen:
                         raise Error("Archive ends after an extended header")
+                    self._end()
                     return
                 type = header[156:157]
                 if type not in _EXTENDED:
@@ -921,11 +934,9 @@ def extract(
     try:
         with _open_archive(src) as stream:
             reader = TarReader(stream)
+            # The reader reads the stream to its end, which verifies a gzip checksum
             for member in reader:
                 extractor.add(member, reader)
-            # Read the rest of the stream, so that a gzip checksum is verified
-            while stream.read(_BUF):
-                pass
         return extractor.finish()
     finally:
         extractor.close()

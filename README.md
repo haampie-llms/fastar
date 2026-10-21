@@ -57,7 +57,8 @@ Archives that tar implementations read differently are rejected, so that no memb
 from one of them: numbers must be plain digits, a member's name and size come from one header
 only, global pax headers cannot set them, long names have no NUL inside, and links, devices and
 fifos have no size. The gzip checksum is always verified, and an archive must end with two zero
-blocks, so that truncation between members is noticed.
+blocks and only zeros after them, so that neither truncation between members nor a second
+archive after the first goes unnoticed.
 
 ## Development
 

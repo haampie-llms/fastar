@@ -608,6 +608,34 @@ def test_end_of_archive_marker(tmp_path, archive, error):
     assert sorted(os.listdir(tmp_path / "d")) == ["a", "b"]
 
 
+@pytest.mark.parametrize(
+    "archive",
+    [
+        TWO_MEMBERS + bytes(1024) + TWO_MEMBERS + bytes(1024),
+        TWO_MEMBERS + bytes(1024 + 2 * untar._BUF) + b"x",
+        gzip.compress(TWO_MEMBERS + bytes(1024))
+        + gzip.compress(TWO_MEMBERS + bytes(1024)),
+    ],
+    # Not the archives, which are too long for an environment variable on Windows
+    ids=["two archives", "data after 2 MiB of zeros", "two gzip files"],
+)
+def test_data_after_end_of_archive_marker(tmp_path, archive):
+    """Every reader ignores it, so a second archive after the first would go unnoticed."""
+    with pytest.raises(untar.Error, match="after the end-of-archive marker"):
+        untar.extract(io.BytesIO(archive), str(tmp_path / "d"))
+    assert os.listdir(tmp_path / "d") == []
+
+
+@pytest.mark.parametrize("compress", [False, True])
+def test_zeros_after_end_of_archive_marker(tmp_path, compress):
+    """Writers pad archives with zeros, to a multiple of the record size for example."""
+    archive = TWO_MEMBERS + bytes(1024 + 2 * untar._BUF + 7)
+    untar.extract(
+        ReadOnly(gzip.compress(archive) if compress else archive), str(tmp_path)
+    )
+    assert sorted(os.listdir(tmp_path)) == ["a", "b"]
+
+
 @needs_symlinks
 def test_fuzz(tmp_path):
     """Corrupt archives fail with an error or extract something, but never write outside."""
