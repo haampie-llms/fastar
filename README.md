@@ -48,10 +48,10 @@ files, dirs, symlinks and hardlinks are extracted.
 Nothing is written outside the destination, whatever the archive contains. Absolute names and
 `..` are rejected, dirs are opened with `O_NOFOLLOW` so nothing is written through a symlink,
 and files are created with `O_EXCL | O_NOFOLLOW` so existing entries are never replaced.
-Symlinks may point anywhere, but untar never follows them. The destination can also be an open
-dir file descriptor, so that a caller who opened it safely extracts into that very dir. On
-Windows, which has no dir file descriptors, these checks are path based and not safe against
-concurrent changes.
+Symlinks may point anywhere, but untar never follows them, except where the destination itself
+is one. The destination can also be an open dir file descriptor, so that a caller who opened it
+safely extracts into that very dir. On Windows, which has no dir file descriptors, these checks
+are path based and not safe against concurrent changes.
 
 Archives that tar implementations read differently are rejected, so that no member can hide
 from one of them: numbers must be plain digits, a member's name and size come from one header

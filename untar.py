@@ -416,7 +416,9 @@ _DIR_FD = {os.open, os.mkdir, os.symlink, os.link, os.rename} <= os.supports_dir
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_BINARY = getattr(os, "O_BINARY", 0)
 # os.open makes file descriptors non-inheritable, so O_CLOEXEC is implied
-_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _O_NOFOLLOW
+#: The caller chooses dest, so it may be a symlink, unlike the dirs in the archive
+_DEST_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+_DIR_FLAGS = _DEST_FLAGS | _O_NOFOLLOW
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_BINARY
 
 #: An open dir: a file descriptor, or a path where dir file descriptors are not supported
@@ -547,7 +549,7 @@ class _Extractor:
             if _WINDOWS and not dest.startswith("\\\\?\\"):
                 # an extended-length path, which may exceed MAX_PATH
                 dest = "\\\\?\\" + dest
-            self.dest = os.open(dest, _DIR_FLAGS) if _DIR_FD else dest
+            self.dest = os.open(dest, _DEST_FLAGS) if _DIR_FD else dest
         while True:
             tmp_name = f".untar-{os.urandom(4).hex()}"
             path, dir_fd = _at(self.dest, tmp_name)
@@ -861,8 +863,8 @@ def extract(
     gid: Optional[int] = None,
 ) -> str:
     """Extract the tar archive ``src``, a path or a binary file object that is read front to
-    back once, into ``dest``: a path, which is created if it does not exist, or the file
-    descriptor of an open dir, which stays open. Entries already in ``dest`` are not replaced:
+    back once, into ``dest``: a path, which is created if it does not exist and may be a symlink to a
+    dir, or the file descriptor of an open dir, which stays open. Entries already in ``dest`` are not replaced:
     an archive with one of the same name is an error.
 
     With ``root_marker``, only the contents of the parent of the shallowest member with that
