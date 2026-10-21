@@ -13,6 +13,15 @@ untar.extract("pkg.tar.gz", "/opt/pkg")
 root = untar.extract("pkg.tar.gz", "/opt/pkg", root_marker=".meta")
 ```
 
+From the command line, like `tar xf pkg.tar.gz -C /opt/pkg`, with `-` to read standard input:
+
+```console
+$ python -m untar pkg.tar.gz /opt/pkg
+```
+
+Unlike tar, the destination is created if it does not exist, and an archive with an entry that
+already exists there is an error, which exits with status 2.
+
 ## Scope
 
 untar is for installing software from archives, not for restoring backups. Owners, groups,
