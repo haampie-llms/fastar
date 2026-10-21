@@ -49,6 +49,8 @@ _CHUNK = 64 * 1024
 _BUF = 1024 * 1024
 #: Pax and GNU long name headers are read into memory: limit their size per member
 _MAX_EXTENDED = 1024 * 1024
+#: Digits of a pax number: enough for any size, with zero padding
+_MAX_DIGITS = 32
 #: Dirs on the stack that stay open: the deepest ones, and shallower ones are reopened if needed
 _MAX_OPEN_DIRS = 64
 _BadGzipFile = getattr(gzip, "BadGzipFile", OSError)
@@ -118,8 +120,9 @@ def _long_name(data: bytes) -> str:
 
 def _decimal(value: str, key: str) -> int:
     """A pax decimal number, of ASCII digits only."""
-    if not value or value.strip("0123456789"):
-        raise Error(f"Archive contains an invalid pax {key} {value!r}")
+    # int() of thousands of digits is slow, and fails from Python 3.11 on
+    if not value or value.strip("0123456789") or len(value) > _MAX_DIGITS:
+        raise Error(f"Archive contains an invalid pax {key} {value[:_MAX_DIGITS]!r}")
     return int(value)
 
 
@@ -141,7 +144,8 @@ def _pax_records(data: bytes) -> Dict[str, str]:
     records = {}
     pos = 0
     while pos < len(data) and data[pos] != 0:
-        space = data.find(b" ", pos)
+        # A length of at most _MAX_DIGITS digits, since int() of more fails from Python 3.11
+        space = data.find(b" ", pos, pos + _MAX_DIGITS + 1)
         length = data[pos:space]
         if space < 0 or not length or length.strip(b"0123456789"):
             raise Error("Archive contains an invalid pax header")

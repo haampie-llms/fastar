@@ -91,6 +91,27 @@ def test_invalid_pax_sizes(tmp_path, size):
     rejects(archive, tmp_path, "invalid pax size")
 
 
+@pytest.mark.parametrize(
+    "records",
+    [
+        record("size", "0" * 5000 + "3"),
+        b"1" * 5000 + b" path=x\n",
+    ],
+    ids=["size", "length"],
+)
+def test_pax_numbers_with_many_digits(tmp_path, records):
+    """int() takes time quadratic in the number of digits, and from Python 3.11 on refuses
+    more than 4300 of them with a ValueError."""
+    rejects(
+        extended(b"x", records) + member("f", b"abc") + EOF, tmp_path, "invalid pax"
+    )
+
+
+def test_pax_numbers_with_zero_padding():
+    archive = extended(b"x", record("size", "0" * 21 + "3")) + member("f", b"abc") + EOF
+    assert members(archive) == [("f", "", 3)]
+
+
 def test_valid_numbers():
     """Leading and trailing spaces and NULs, octal without terminator, and base-256."""
     for size in [
