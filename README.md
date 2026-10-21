@@ -8,10 +8,8 @@ destination or through a symlink, existing files are never replaced, owners and 
 the archive are not restored, and device files are rejected. On POSIX systems, entries are created
 relative to open directory file descriptors. That rules out races where a directory is swapped for
 a symlink between a check and its use, which implementations that work with paths are prone to.
-Ambiguous archives that different tar implementations parse differently are rejected, and
-extraction happens in a temporary directory, so an invalid or truncated archive leaves the
-destination untouched.
-
+Archives that tar implementations parse differently are rejected, and extraction happens in a
+temporary directory, so an invalid or truncated archive leaves the destination untouched.
 
 ```python
 import untar
@@ -32,7 +30,29 @@ $ python -m untar pkg.tar.gz /opt/pkg
 Unlike tar, the destination is created if it does not exist, and an archive with an entry that
 already exists there is an error, which exits with status 2.
 
-### Decompressing in a thread
+## Scope
+
+untar is for installing software from archives, not for restoring backups. Owners, groups,
+timestamps and permissions recorded in an archive describe the machine it was made on; on
+another machine they are meaningless at best and a liability at worst. So untar does not
+restore them: files are created with `file_mode` (without executable bits where the archive
+has none for the owner), dirs with `dir_mode`, optionally with group `gid`, and only regular
+files, dirs, symlinks and hardlinks are extracted.
+
+## Features
+
+- Streaming: the archive is read front to back once, without seeking, from a file, pipe or
+  network stream. Gzip is detected from the first bytes.
+- Fast parser: only the header fields that extraction needs are parsed (ustar, pax and GNU long
+  names).
+- Dynamic `--strip-components`: with `root_marker`, the parent of the shallowest member with
+  that name is extracted, like `tar --strip-components` with a count that is only known after
+  the last member.
+- No path length limits: entries are created relative to open dir file descriptors, or on
+  Windows by extended-length paths, so archives extract even where a member's full path would
+  exceed the operating system's limit.
+
+## Decompressing in a thread
 
 untar decompresses and extracts one after the other, in one thread, while `tar xzf` and
 `gzip -d | tar xf -` decompress in another process at the same time. In Python, a thread can do
@@ -89,45 +109,23 @@ with Gunzip("pkg.tar.gz") as stream:
 ```
 
 untar reads the stream to its end before it moves anything into the destination, so an archive
-with a bad gzip checksum still extracts nothing.
-
-## Scope
-
-untar is for installing software from archives, not for restoring backups. Owners, groups,
-timestamps and permissions recorded in an archive describe the machine it was made on; on
-another machine they are meaningless at best and a liability at worst. So untar does not
-restore them: files are created with `file_mode` (without executable bits where the archive
-has none for the owner), dirs with `dir_mode`, optionally with group `gid`, and only regular
-files, dirs, symlinks and hardlinks are extracted.
-
-## Features
-
-- Streaming: the archive is read front to back once, without seeking, from a file, pipe or
-  network stream. Gzip is detected from the first bytes.
-- Fast parser: only the header fields that extraction needs are parsed (ustar, pax and GNU long
-  names).
-- Dynamic `--strip-components`: If you pass `root_marker`, the parent of the shallowest
-  member with that name is extracted, like `tar --strip-components` with a count that is only
-  known after the last member.
-- No path length limits: entries are created relative to open dir file descriptors, so you can
-  extract tarballs even if their path as a string would exceed the operating system limit.
+with a bad gzip checksum leaves the destination untouched.
 
 ## Safety
 
-Nothing is written outside the destination, whatever the archive contains. Absolute names and
-`..` are rejected, dirs are opened with `O_NOFOLLOW` so nothing is written through a symlink,
-and files are created with `O_EXCL | O_NOFOLLOW` so existing entries are never replaced.
-Symlinks may point anywhere, but untar never follows them, except where the destination itself
-is one. The destination can also be an open dir file descriptor, so that a caller who opened it
-safely extracts into that very dir. On Windows, which has no dir file descriptors, these checks
-are path based and not safe against concurrent changes.
+Absolute names and `..` are rejected, dirs are opened with `O_NOFOLLOW` so nothing is written
+through a symlink, and files are created with `O_EXCL | O_NOFOLLOW` so existing entries are never
+replaced. Symlinks may point anywhere, but untar never follows them, except where the destination
+itself is one. The destination can also be an open dir file descriptor, so that a caller who
+opened it safely extracts into that very dir. On Windows, which has no dir file descriptors, these
+checks are path based and not safe against concurrent changes.
 
-Parsing is relatively strict, the idea is to reject tar files that would extract differently under
-different tar implementations that have more lenient parsing. So, numbers must be plain digits,
-a member's name and size come from one header only, global pax headers cannot set them, long names
-cannot have NUL inside, and links, devices and fifos cannot have a size. The gzip checksum is
-always verified, and an archive must end with two zero blocks and only zeros after them, so that
-neither truncation between members nor a second archive after the first goes unnoticed.
+Parsing is relatively strict: the idea is to reject tar files that would extract differently
+under tar implementations with more lenient parsing. Numbers must be plain digits, a member's name
+and size come from one header only, global pax headers cannot set them, long names cannot have a
+NUL inside, and links, devices and fifos cannot have a size. The gzip checksum is always
+verified, and an archive must end with two zero blocks and only zeros after them, so that neither
+truncation between members nor a second archive after the first goes unnoticed.
 
 ## Development
 
