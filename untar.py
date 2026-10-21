@@ -143,17 +143,21 @@ def _pax_records(data: bytes) -> Dict[str, str]:
     """Parse the ``<length> <key>=<value>\\n`` records of a pax extended header."""
     records = {}
     pos = 0
-    while pos < len(data) and data[pos] != 0:
+    # The records fill the header: readers disagree on what follows a NUL in between
+    while pos < len(data):
         # A length of at most _MAX_DIGITS digits, since int() of more fails from Python 3.11
         space = data.find(b" ", pos, pos + _MAX_DIGITS + 1)
         length = data[pos:space]
-        if space < 0 or not length or length.strip(b"0123456789"):
+        # Without leading zeros: some readers find the end of a record from the length as
+        # written
+        if space < 0 or not length.isdigit() or length[0] == 0x30:
             raise Error("Archive contains an invalid pax header")
         end = pos + int(length)
         if end <= space or end > len(data) or data[end - 1] != 0x0A:
             raise Error("Archive contains an invalid pax header")
         key, equals, value = data[space + 1 : end - 1].partition(b"=")
-        if not key or not equals:
+        # GNU tar skips blanks before a key, and readers stop at a NUL in it or skip it
+        if not key or not equals or key[0] in b" \t" or 0 in key:
             raise Error("Archive contains an invalid pax record")
         records[key.decode("utf-8", "surrogateescape")] = value.decode(
             "utf-8", "surrogateescape"
