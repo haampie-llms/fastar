@@ -330,11 +330,20 @@ class TarReader:
                     raise Error(f"Archive contains an invalid pax {key} {pax[key]!r}")
 
             header_name = _str(header[0:100])
-            # Like GNU tar, only POSIX ustar headers (version 00) have a name prefix
-            if header[257:265] == b"ustar\x0000":
+            # Like GNU tar and libarchive, ustar headers have a name prefix, whatever their
+            # version. Other headers have times there (GNU incremental), which some readers
+            # take for a prefix.
+            if header[257:263] == b"ustar\0":
+                # star's prefix is 131 bytes, followed by times, for some readers
+                if header[508:512] == b"tar\0" and 0 not in header[345:476]:
+                    raise Error("Archive contains a star header with a long prefix")
                 prefix = _str(header[345:500])
                 if prefix:
                     header_name = f"{prefix}/{header_name}"
+            elif header[345]:
+                raise Error(
+                    "Archive contains a name prefix in a header that is not ustar"
+                )
             name = long_name if long_name is not None else pax.get("path", header_name)
             if type == AREGTYPE:
                 # Old tar implementations write dirs as files named with a slash. tarfile
