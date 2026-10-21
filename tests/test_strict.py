@@ -319,6 +319,13 @@ def test_extended_headers_are_limited_per_member(tmp_path):
     rejects(archive + member("f", type=b"1") + EOF, tmp_path, "more than 1 MiB")
 
 
+def test_negative_sizes():
+    """A negative size would move a reader back, maybe in circles."""
+    size = b"\xff" * 11 + b" "
+    with pytest.raises(untar.Error, match="negative"):
+        members((header(size=size) + data(b"abc")) * 3 + EOF)
+
+
 # Reading
 
 
