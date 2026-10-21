@@ -182,6 +182,41 @@ def test_extended_header_without_member(tmp_path, type, end):
 
 
 @pytest.mark.parametrize("type", [b"L", b"K"])
+def test_gnu_long_names_with_nul_inside(tmp_path, type):
+    """Readers that stop at the NUL and readers that keep the rest see different names."""
+    rejects(
+        extended(type, b"good\0bad\0") + member("f", type=b"2", linkname="t") + EOF,
+        tmp_path,
+        "NUL inside",
+    )
+
+
+def test_gnu_long_names_end_with_nuls():
+    archive = extended(b"L", b"name\0\0") + member("f", type=b"2", linkname="t") + EOF
+    assert members(archive) == [("name", "t", 0)]
+
+
+@pytest.mark.parametrize("type", [b"1", b"2", b"3", b"4", b"6"])
+@pytest.mark.parametrize("pax", [False, True])
+def test_size_without_data(type, pax):
+    """tar and tarfile read what follows a link, device or fifo with a size as headers, the
+    Rust tar crates skip it as data: either could miss a member."""
+    hidden = member("hidden", b"x")
+    if pax:
+        archive = extended(b"x", record("size", "512")) + header("f", type, 0, "t")
+    else:
+        archive = header("f", type, 512, "t")
+    with pytest.raises(untar.Error, match="with size 512"):
+        members(archive + hidden + EOF)
+
+
+def test_dir_size_without_data():
+    """Some tar implementations give dirs a size, which tar and tarfile ignore."""
+    archive = header("d/", b"5", 512) + member("after", b"x") + EOF
+    assert members(archive) == [("d", "", 512), ("after", "", 1)]
+
+
+@pytest.mark.parametrize("type", [b"L", b"K"])
 def test_empty_gnu_long_names(tmp_path, type):
     rejects(
         extended(type, b"\0") + member("f", type=b"2", linkname="t") + EOF,
