@@ -49,6 +49,8 @@ _EOF_BLOCK = bytes(_BLOCK)
 _PAX_SIZE = 8**11
 _CHUNK = 64 * 1024
 _BUF = 1024 * 1024
+#: Pax keys of sparse files other than GNU.sparse.*, of star and Solaris
+_SPARSE_KEYS = ("SCHILY.realsize", "SUN.holesdata")
 #: Pax and GNU long name headers are read into memory: limit their size per member
 _MAX_EXTENDED = 1024 * 1024
 #: Digits of a pax number: enough for any size, with zero padding
@@ -176,6 +178,11 @@ def _pax_records(data: bytes) -> Dict[str, str]:
         )
         pos = end
     return records
+
+
+def _sparse(pax: Dict[str, str]) -> bool:
+    """Whether the pax records are those of a sparse file."""
+    return any(key.startswith("GNU.sparse.") or key in _SPARSE_KEYS for key in pax)
 
 
 def _fill(stream: IO[bytes], size: int) -> bytes:
@@ -357,7 +364,7 @@ class TarReader:
                     raise Error(f"Archive contains {name}, named like a directory once")
                 if slash:
                     type = DIRTYPE
-            if type == b"S" or any(key.startswith("GNU.sparse.") for key in pax):
+            if type == b"S" or pax and _sparse(pax):
                 raise Error(
                     f"Archive contains a sparse file {name}, which is not supported"
                 )
