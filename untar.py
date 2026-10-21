@@ -17,7 +17,7 @@ import sys
 import zlib
 from typing import IO, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = ["Error", "Member", "TarReader", "extract"]
 
 REGTYPE = b"0"
