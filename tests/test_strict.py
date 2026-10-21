@@ -395,6 +395,15 @@ def test_pax_sizes_for_large_files():
     assert members(archive) == [("f", "", 3)]
 
 
+@pytest.mark.parametrize(
+    "key,value", [("SCHILY.realsize", "10000"), ("SUN.holesdata", " 0 512")]
+)
+def test_sparse_pax_keys(tmp_path, key, value):
+    """Some readers make a sparse file of these, with other contents."""
+    archive = extended(b"x", record(key, value)) + member("f", b"A" * 1024) + EOF
+    rejects(archive, tmp_path, "sparse")
+
+
 # gzip
 
 
