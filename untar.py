@@ -95,15 +95,21 @@ def _str(field: bytes) -> str:
 
 
 def _int(field: bytes) -> int:
-    """A numeric header field: NUL or space terminated octal, or base-256 (GNU)."""
+    """A numeric header field: octal, or base-256 (GNU)."""
     if field[0] == 0o200:
         return int.from_bytes(field[1:], "big")
     elif field[0] == 0o377:
         raise Error("Archive contains a negative number")
-    digits = field.split(b"\0", 1)[0].strip()
-    # Only octal digits, like tar
+    return _octal(field)
+
+
+def _octal(field: bytes) -> int:
+    """Octal digits, with leading spaces and trailing spaces or NULs."""
+    digits = field.lstrip(b" ").rstrip(b" \0")
+    # Readers disagree on other padding: some skip a leading NUL or other whitespace, others
+    # stop there, and some read digits after a NUL.
     if digits.strip(b"01234567"):
-        raise Error(f"Archive contains an invalid number {digits!r}")
+        raise Error(f"Archive contains an invalid number {field!r}")
     return int(digits, 8) if digits else 0
 
 
@@ -127,7 +133,9 @@ def _decimal(value: str, key: str) -> int:
 
 
 def _checksum_ok(header: bytes) -> bool:
-    expected = _int(header[148:156])
+    # Octal only: tar and libarchive refuse a base-256 checksum, and look for the next
+    # header in what follows
+    expected = _octal(header[148:156])
     # adler32's low half is the byte sum mod 65521, which is exact for 256 bytes
     total = (zlib.adler32(header[:256], 0) & 0xFFFF) + (
         zlib.adler32(header[256:], 0) & 0xFFFF
