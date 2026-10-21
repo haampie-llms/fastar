@@ -162,7 +162,7 @@ class TarReader:
     """Reads the members of a tar archive front to back from a binary stream, without seeking.
 
     Parses ustar headers, pax extended headers and GNU long names, and verifies header
-    checksums. Iterate for members, and read the data of the current regular file with
+    checksums and the end-of-archive marker. Iterate for members, and read the data of the current regular file with
     ``chunks()``; data that is not read is skipped."""
 
     def __init__(self, stream: IO[bytes]) -> None:
@@ -195,16 +195,12 @@ class TarReader:
         return self.buf[pos : pos + size]
 
     def _header(self) -> Optional[bytes]:
-        if self.pos + _BLOCK > len(self.buf):
-            self._more(_BLOCK)
-            if not self.buf:
-                return None
-            if len(self.buf) < _BLOCK:
-                raise Error("Archive is truncated")
-        pos = self.pos
-        self.pos = pos + _BLOCK
-        header = self.buf[pos : pos + _BLOCK]
+        """The next header, or None at the end-of-archive marker."""
+        header = self._read(_BLOCK)
         if header == _EOF_BLOCK:
+            # The marker is two zero blocks. tar and tarfile stop at one, and skip what follows.
+            if self._read(_BLOCK) != _EOF_BLOCK:
+                raise Error("Archive contains a lone zero block")
             return None
         if not _checksum_ok(header):
             raise Error("Archive contains a header with an invalid checksum")
@@ -224,6 +220,9 @@ class TarReader:
             yield memoryview(self.buf)[pos : pos + n]
 
     def __iter__(self) -> Iterator[Member]:
+        self._more(_BLOCK)
+        if not self.buf:
+            raise Error("Archive is empty")
         padding = 0
         while True:
             skip = self.remaining + padding

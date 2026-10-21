@@ -177,7 +177,8 @@ def test_pax_and_gnu_names(tmp_path, headers):
 def test_extended_header_without_member(tmp_path, type, end):
     """Dropping it silently would hide truncation."""
     content = record("path", "a") if type == b"x" else b"a\0"
-    rejects(member("first") + extended(type, content) + end, tmp_path, "ends after")
+    match = "ends after" if end else "truncated"
+    rejects(member("first") + extended(type, content) + end, tmp_path, match)
 
 
 @pytest.mark.parametrize("type", [b"L", b"K"])
