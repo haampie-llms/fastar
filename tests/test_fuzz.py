@@ -3,7 +3,6 @@ recomputed, so that mutations get past the checksum. Whatever the archive, readi
 progress and raise only untar.Error, and extracting must raise only untar.Error or OSError and
 change nothing outside the destination."""
 
-import errno
 import gzip
 import io
 import itertools
@@ -13,7 +12,7 @@ import shutil
 import tarfile
 
 import pytest
-from test_untar import SAMPLE, make_tar, needs_symlinks, snapshot
+from test_untar import SAMPLE, fail_with_eperm, make_tar, needs_symlinks, snapshot
 
 import untar
 
@@ -173,12 +172,8 @@ def check_extract(archive: bytes, outer) -> None:
 @pytest.mark.parametrize("links", ["supported", "unsupported"])
 def test_fuzz_fields(tmp_path, monkeypatch, links):
     if links == "unsupported":
-
-        def fail(*args, **kwargs):
-            raise OSError(errno.EPERM, "links are not supported")
-
-        monkeypatch.setattr(os, "symlink", fail)
-        monkeypatch.setattr(os, "link", fail)
+        monkeypatch.setattr(os, "symlink", fail_with_eperm)
+        monkeypatch.setattr(os, "link", fail_with_eperm)
     outer = tmp_path / "outer"
     outer.mkdir()
     (outer / "flag").write_bytes(b"flag")

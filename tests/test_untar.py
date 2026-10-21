@@ -770,13 +770,14 @@ def test_gid(tmp_path, dir_fd):
 # Where links are not supported
 
 
+def fail_with_eperm(*args, **kwargs):
+    raise OSError(errno.EPERM, "links are not supported")
+
+
 @pytest.mark.parametrize("target_first", [False, True])
 def test_links_are_copied_where_unsupported(tmp_path, monkeypatch, target_first):
-    def fail(*args, **kwargs):
-        raise OSError(errno.EPERM, "links are not supported")
-
-    monkeypatch.setattr(os, "symlink", fail)
-    monkeypatch.setattr(os, "link", fail)
+    monkeypatch.setattr(os, "symlink", fail_with_eperm)
+    monkeypatch.setattr(os, "link", fail_with_eperm)
     target = [("lib/libfoo.so.1", "f", b"foo", 0o644)]
     links = [
         ("lib/libfoo.so", "s", "libfoo.so.1", 0o777),
@@ -791,6 +792,26 @@ def test_links_are_copied_where_unsupported(tmp_path, monkeypatch, target_first)
         path = tmp_path / "lib" / name
         assert not path.is_symlink() and path.read_bytes() == b"foo"
     assert (tmp_path / "lib" / "sub").is_dir()
+
+
+def test_symlink_chains_are_copied_where_unsupported(tmp_path, monkeypatch):
+    """A symlink to a symlink is copied after it, also where it comes first, as in sorted
+    shared library chains. Links are copied in time linear in their number."""
+    monkeypatch.setattr(os, "symlink", fail_with_eperm)
+    copies = []
+    copy = untar._Extractor._copy
+    monkeypatch.setattr(
+        untar._Extractor,
+        "_copy",
+        lambda self, *args: copies.append(1) or copy(self, *args),
+    )
+    n = 100
+    members = [(f"l{i}", "s", f"l{i + 1}", 0o777) for i in range(n)]
+    members.append((f"l{n}", "f", b"foo", 0o644))
+    untar.extract(io.BytesIO(make_tar(members)), str(tmp_path))
+    for i in range(n + 1):
+        assert (tmp_path / f"l{i}").read_bytes() == b"foo"
+    assert len(copies) <= 2 * n
 
 
 def test_solaris_extended_header(tmp_path):
