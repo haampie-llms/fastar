@@ -661,13 +661,23 @@ class _Extractor:
                     _close(d)
                 _rmdir(self.tmp, name)
 
-    def _attrs(self, fd: Dir, mode: int, chmod: bool) -> None:
+    def _attrs(self, d: Dir, mode: int, chmod: bool) -> None:
         """Set the group and mode of an open file or dir, which never follows a symlink."""
+        if isinstance(d, str):
+            # A dir by path, where dir file descriptors are not supported, but it may still be
+            # opened without following a symlink
+            if self.chown or chmod:
+                fd = os.open(d, _DIR_FLAGS)
+                try:
+                    self._attrs(fd, mode, chmod)
+                finally:
+                    os.close(fd)
+            return
         # chown before chmod, since chown may clear set-user-ID and set-group-ID bits
         if self.chown:
-            os.fchown(fd, -1, self.gid)  # type: ignore
+            os.fchown(d, -1, self.gid)  # type: ignore
         if chmod:
-            os.fchmod(fd, mode)  # type: ignore
+            os.fchmod(d, mode)  # type: ignore
 
     def _dir(self, parts: List[str]) -> Dir:
         """Open tmp/parts, creating missing dirs, and keep its deepest ancestors open."""

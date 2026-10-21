@@ -710,12 +710,20 @@ def test_reader():
 # Modes and groups
 
 
+@pytest.fixture(params=[True, False], ids=["dir_fd", "path"])
+def dir_fd(request, monkeypatch):
+    """Extract relative to dir file descriptors, and by path like where they are not supported."""
+    if request.param and not untar._DIR_FD:
+        pytest.skip("no dir file descriptors")
+    monkeypatch.setattr(untar, "_DIR_FD", request.param)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
 @pytest.mark.parametrize("umask", [0o022, 0o077, 0o000])
 @pytest.mark.parametrize(
     "file_mode,dir_mode", [(0o755, 0o755), (0o750, 0o2750), (0o700, 0o700)]
 )
-def test_modes(tmp_path, umask, file_mode, dir_mode):
+def test_modes(tmp_path, umask, file_mode, dir_mode, dir_fd):
     old = os.umask(umask)
     try:
         untar.extract(
@@ -751,7 +759,7 @@ def test_dir_mode_without_owner_rwx(tmp_path, dir_mode):
 @pytest.mark.skipif(
     not hasattr(os, "getgroups") or len(os.getgroups()) < 2, reason="needs 2 groups"
 )
-def test_gid(tmp_path):
+def test_gid(tmp_path, dir_fd):
     gid = next(g for g in os.getgroups() if g != os.getegid())
     untar.extract(io.BytesIO(make_tar(SAMPLE)), str(tmp_path), gid=gid, dir_mode=0o2755)
     for dirpath, dirnames, filenames in os.walk(tmp_path / "pkg"):
