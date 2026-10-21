@@ -327,20 +327,26 @@ class TarReader:
                 if key in pax and (not pax[key] or "\0" in pax[key]):
                     raise Error(f"Archive contains an invalid pax {key} {pax[key]!r}")
 
-            name = _str(header[0:100])
+            header_name = _str(header[0:100])
             # Like GNU tar, only POSIX ustar headers (version 00) have a name prefix
             if header[257:265] == b"ustar\x0000":
                 prefix = _str(header[345:500])
                 if prefix:
-                    name = f"{prefix}/{name}"
-            if type == AREGTYPE and name.endswith("/"):
-                type = DIRTYPE
+                    header_name = f"{prefix}/{header_name}"
+            name = long_name if long_name is not None else pax.get("path", header_name)
+            if type == AREGTYPE:
+                # Old tar implementations write dirs as files named with a slash. tarfile
+                # looks for it in the name in the header, others in the final name.
+                slash = header_name.endswith("/")
+                if slash != name.endswith("/"):
+                    raise Error(f"Archive contains {name}, named like a directory once")
+                if slash:
+                    type = DIRTYPE
             if type == b"S" or any(key.startswith("GNU.sparse.") for key in pax):
                 raise Error(
                     f"Archive contains a sparse file {name}, which is not supported"
                 )
 
-            name = long_name if long_name is not None else pax.get("path", name)
             if type == DIRTYPE:
                 name = name.rstrip("/") or name
             if "size" in pax:

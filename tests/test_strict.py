@@ -326,6 +326,28 @@ def test_prefix_only_in_posix_ustar():
     assert members(v7) == [("name", "", 0)]
 
 
+@pytest.mark.parametrize(
+    "headers,name",
+    [
+        (extended(b"x", record("path", "file")), "dir/"),
+        (extended(b"L", b"file\0"), "dir/"),
+        (extended(b"x", record("path", "dir/")), "file"),
+    ],
+    ids=["pax path", "GNU long name", "pax dir"],
+)
+def test_old_dirs_named_like_dirs_once(tmp_path, headers, name):
+    """Old tar implementations write dirs as files named with a slash. Some readers look
+    for it in the name in the header, others in the final name: a file there has data, and
+    a dir has none, which is where the others see a member."""
+    archive = headers + header(name, b"\0", 1024) + member("hidden", bytes(1024)) + EOF
+    rejects(archive, tmp_path, "named like a directory")
+
+
+def test_old_dirs_named_like_dirs():
+    archive = extended(b"x", record("path", "long/")) + header("dir/", b"\0", 0) + EOF
+    assert members(archive) == [("long", "", 0)]
+
+
 # gzip
 
 
