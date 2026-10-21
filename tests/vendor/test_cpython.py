@@ -133,7 +133,13 @@ def raw_members(data: bytes):
 
 
 def supported(member: tarfile.TarInfo) -> bool:
-    return member.type not in UNSUPPORTED and not member.issparse()
+    # pax/regtype4 has a pax size, and 0 as the size in its header, which readers that
+    # ignore the pax size read
+    return (
+        member.type not in UNSUPPORTED
+        and not member.issparse()
+        and "size" not in member.pax_headers
+    )
 
 
 def utf8(member: tarfile.TarInfo) -> bool:
@@ -194,7 +200,7 @@ def test_members_like_tarfile():
                 content,
             )
         )
-    assert len(actual) == len(expected) == 32
+    assert len(actual) == len(expected) == 31
     for a, e in zip(actual, expected):
         assert a == e, e[0]
 
@@ -228,7 +234,8 @@ def test_checksums():
 
 @needs_testdata
 def test_unsupported_members():
-    """Sparse files of each kind, devices and fifos are rejected, each in an archive of its own."""
+    """Sparse files of each kind, devices, fifos and a pax size that the size in the header
+    disagrees with are rejected, each in an archive of its own."""
     rejected = []
     for member, raw in raw_members(read_testtar()):
         if supported(member):
@@ -246,6 +253,7 @@ def test_unsupported_members():
         "gnu/sparse-0.0",
         "gnu/sparse-0.1",
         "gnu/sparse-1.0",
+        "pax/regtype4",
     ]
 
 

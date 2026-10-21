@@ -286,10 +286,13 @@ def test_size_without_data(type, pax):
     Rust tar crates skip it as data: either could miss a member."""
     hidden = member("hidden", b"x")
     if pax:
-        archive = extended(b"x", record("size", "512")) + header("f", type, 0, "t")
+        # Too large for the ustar size, which is 0 then
+        size = untar._PAX_SIZE
+        archive = extended(b"x", record("size", str(size))) + header("f", type, 0, "t")
     else:
-        archive = header("f", type, 512, "t")
-    with pytest.raises(untar.Error, match="with size 512"):
+        size = 512
+        archive = header("f", type, size, "t")
+    with pytest.raises(untar.Error, match=f"with size {size}"):
         members(archive + hidden + EOF)
 
 
@@ -355,6 +358,30 @@ def test_old_dirs_named_like_dirs_once(tmp_path, headers, name):
 def test_old_dirs_named_like_dirs():
     archive = extended(b"x", record("path", "long/")) + header("dir/", b"\0", 0) + EOF
     assert members(archive) == [("long", "", 0)]
+
+
+@pytest.mark.parametrize("pax_size,size", [(0, 1024), (1024, 0), (1024, 512)])
+def test_pax_size_and_size(tmp_path, pax_size, size):
+    """Readers without pax support, or that ignore its size, use the size in the header."""
+    archive = (
+        extended(b"x", record("size", str(pax_size)))
+        + header("f", size=size)
+        + member("hidden", bytes(1024))
+        + EOF
+    )
+    rejects(archive, tmp_path, f"pax size {pax_size} and size {size}")
+
+
+def test_pax_sizes_for_large_files():
+    """Writers use a pax size for files too large for the size in the header, and write 0
+    or the same size there."""
+    large = untar._PAX_SIZE
+    for size in [0, large]:
+        archive = extended(b"x", record("size", str(large))) + header("f", size=size)
+        reader = untar.TarReader(io.BytesIO(archive))
+        assert next(iter(reader)).size == large
+    archive = extended(b"x", record("size", "3")) + member("f", b"abc") + EOF
+    assert members(archive) == [("f", "", 3)]
 
 
 # gzip

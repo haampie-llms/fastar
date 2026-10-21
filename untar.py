@@ -45,6 +45,8 @@ _NO_DATA_TYPES = (LNKTYPE, SYMTYPE, DIRTYPE, b"3", b"4", b"6")
 _WINDOWS = sys.platform == "win32"
 _BLOCK = 512
 _EOF_BLOCK = bytes(_BLOCK)
+#: Sizes from this on do not fit in a ustar header, and are written in a pax header
+_PAX_SIZE = 8**11
 _CHUNK = 64 * 1024
 _BUF = 1024 * 1024
 #: Pax and GNU long name headers are read into memory: limit their size per member
@@ -353,10 +355,16 @@ class TarReader:
 
             if type == DIRTYPE:
                 name = name.rstrip("/") or name
+            size = _int(header[124:136])
             if "size" in pax:
-                size = _decimal(pax["size"], "size")
-            else:
-                size = _int(header[124:136])
+                pax_size = _decimal(pax["size"], "size")
+                # Readers without pax support use the ustar size. Writers only use a pax
+                # size that is too large for it, and then write 0 or the same size there.
+                if pax_size != size and (size or pax_size < _PAX_SIZE):
+                    raise Error(
+                        f"Archive contains {name} with pax size {pax_size} and size {size}"
+                    )
+                size = pax_size
             if long_link is None:
                 long_link = pax.get("linkpath", _str(header[157:257]))
             member = Member(name, type, _int(header[100:108]), size, long_link)
