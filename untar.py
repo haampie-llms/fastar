@@ -427,7 +427,17 @@ def _resolve(parts: List[str], linkname: str) -> Optional[List[str]]:
 
 #: Whether entries are created relative to open dir file descriptors. Otherwise, as on Windows,
 #: they are created by (extended-length) path.
-_DIR_FD = {os.open, os.mkdir, os.symlink, os.link, os.rename} <= os.supports_dir_fd
+_DIR_FD = {
+    os.open,
+    os.mkdir,
+    os.symlink,
+    os.link,
+    os.rename,
+    os.stat,
+    os.unlink,
+    os.rmdir,
+    os.chown,
+} <= os.supports_dir_fd and {os.link, os.stat, os.chown} <= os.supports_follow_symlinks
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_BINARY = getattr(os, "O_BINARY", 0)
 # os.open makes file descriptors non-inheritable, so O_CLOEXEC is implied
