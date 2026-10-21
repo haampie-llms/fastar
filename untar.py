@@ -890,3 +890,30 @@ def extract(
         return extractor.finish()
     finally:
         extractor.close()
+
+
+def _main(argv: Optional[List[str]] = None) -> int:
+    """``python -m untar <archive> <dest>``, like ``tar xf <archive> -C <dest>``."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m untar",
+        description="Extract a tar archive, optionally gzip compressed, into a directory.",
+    )
+    parser.add_argument("archive", help="the archive, or - to read standard input")
+    parser.add_argument(
+        "dest", help="the directory to extract into, created if it does not exist"
+    )
+    args = parser.parse_args(argv)
+    src = sys.stdin.buffer if args.archive == "-" else args.archive
+    try:
+        extract(src, args.dest)
+    except (Error, OSError) as e:
+        # Like tar, exit with 2 on errors
+        print(f"untar: {e}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main())
