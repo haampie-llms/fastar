@@ -710,6 +710,16 @@ def test_modes(tmp_path, umask, file_mode, dir_mode):
                 assert stat.S_IMODE(s.st_mode) == expected, name
 
 
+@pytest.mark.parametrize("dir_mode", [0o555, 0o355, 0o655, 0o055])
+def test_dir_mode_without_owner_rwx(tmp_path, dir_mode):
+    """Entries are created in dirs after their mode is set, so the owner needs rwx."""
+    with pytest.raises(ValueError, match="dir_mode"):
+        untar.extract(
+            io.BytesIO(make_tar(SAMPLE)), str(tmp_path / "d"), dir_mode=dir_mode
+        )
+    assert not (tmp_path / "d").exists()
+
+
 @pytest.mark.skipif(
     not hasattr(os, "getgroups") or len(os.getgroups()) < 2, reason="needs 2 groups"
 )

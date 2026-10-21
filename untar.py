@@ -908,12 +908,15 @@ def extract(
     is written through a symlink.
 
     Files are created with ``file_mode``, without executable bits if the member is not
-    executable by its owner, and dirs with ``dir_mode``; with ``gid``, both get that group.
-    Timestamps and ownership in the archive are not restored. Members must be regular files,
-    dirs, symlinks or hardlinks, and cannot be absolute or contain ``..``. Where links cannot
-    be created, their targets are copied."""
+    executable by its owner, and dirs with ``dir_mode``, which must give the owner rwx; with
+    ``gid``, both get that group. Timestamps and ownership in the archive are not restored.
+    Members must be regular files, dirs, symlinks or hardlinks, and cannot be absolute or
+    contain ``..``. Where links cannot be created, their targets are copied."""
     if gid is not None and _WINDOWS:
         raise ValueError("gid is not supported on Windows")
+    # Dir modes are set when dirs are created, and entries are then created in them
+    if dir_mode & 0o700 != 0o700:
+        raise ValueError(f"dir_mode {oct(dir_mode)} must give the owner rwx (0o700)")
     extractor = _Extractor(dest, root_marker, file_mode, dir_mode, gid)
     try:
         with _open_archive(src) as stream:
