@@ -1,7 +1,17 @@
 # untar
 
-Fast, safe, streaming extraction of tar archives that distribute software, in a single pure
-Python module without dependencies, for Python 3.6 and later.
+This package extracts tarballs fast and safely, and is deliberately restricted to the subset of tar
+features used to distribute software. It supports Python 3.6 and later.
+
+It differs significantly from typical tar implementations: nothing is written outside the
+destination or through a symlink, existing files are never replaced, owners and permissions from
+the archive are not restored, and device files are rejected. On POSIX systems, entries are created
+relative to open directory file descriptors. That rules out races where a directory is swapped for
+a symlink between a check and its use, which implementations that work with paths are prone to.
+Ambiguous archives that different tar implementations parse differently are rejected, and
+extraction happens in a temporary directory, so an invalid or truncated archive leaves the
+destination untouched.
+
 
 ```python
 import untar
@@ -92,15 +102,15 @@ files, dirs, symlinks and hardlinks are extracted.
 
 ## Features
 
-- **One pass.** The archive is read front to back once, without seeking, from a file, pipe or
+- Streaming: the archive is read front to back once, without seeking, from a file, pipe or
   network stream. Gzip is detected from the first bytes.
-- **Less work per member.** Only the header fields that extraction needs are parsed (ustar,
-  pax and GNU long names), and a file costs an `open`, `write`s and a `close`.
-- **A root only known from the contents.** With `root_marker`, the parent of the shallowest
+- Fast parser: only the header fields that extraction needs are parsed (ustar, pax and GNU long
+  names).
+- Dynamic `--strip-components`: If you pass `root_marker`, the parent of the shallowest
   member with that name is extracted, like `tar --strip-components` with a count that is only
   known after the last member.
-- **No path length limits.** Entries are created relative to open dir file descriptors, so no
-  path longer than one name is passed to the operating system.
+- No path length limits: entries are created relative to open dir file descriptors, so you can
+  extract tarballs even if their path as a string would exceed the operating system limit.
 
 ## Safety
 
@@ -112,12 +122,12 @@ is one. The destination can also be an open dir file descriptor, so that a calle
 safely extracts into that very dir. On Windows, which has no dir file descriptors, these checks
 are path based and not safe against concurrent changes.
 
-Archives that tar implementations read differently are rejected, so that no member can hide
-from one of them: numbers must be plain digits, a member's name and size come from one header
-only, global pax headers cannot set them, long names have no NUL inside, and links, devices and
-fifos have no size. The gzip checksum is always verified, and an archive must end with two zero
-blocks and only zeros after them, so that neither truncation between members nor a second
-archive after the first goes unnoticed.
+Parsing is relatively strict, the idea is to reject tar files that would extract differently under
+different tar implementations that have more lenient parsing. So, numbers must be plain digits,
+a member's name and size come from one header only, global pax headers cannot set them, long names
+cannot have NUL inside, and links, devices and fifos cannot have a size. The gzip checksum is
+always verified, and an archive must end with two zero blocks and only zeros after them, so that
+neither truncation between members nor a second archive after the first goes unnoticed.
 
 ## Development
 
