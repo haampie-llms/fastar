@@ -724,6 +724,9 @@ def dir_fd(request, monkeypatch):
     "file_mode,dir_mode", [(0o755, 0o755), (0o750, 0o2750), (0o700, 0o700)]
 )
 def test_modes(tmp_path, umask, file_mode, dir_mode, dir_fd):
+    # New dirs get the group of their parent on macOS. chmod drops set-group-ID unless
+    # the user is in that group, so give tmp_path one the user is in.
+    os.chown(tmp_path, -1, os.getegid())
     old = os.umask(umask)
     try:
         untar.extract(
