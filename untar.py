@@ -447,10 +447,12 @@ def _open_dir(parent: Dir, name: str) -> Dir:
     return path
 
 
-def _isreg(parent: Dir, name: str) -> bool:
+def _exists_not_dir(parent: Dir, name: str) -> bool:
     path, dir_fd = _at(parent, name)
     try:
-        return stat.S_ISREG(os.stat(path, dir_fd=dir_fd, follow_symlinks=False).st_mode)
+        return not stat.S_ISDIR(
+            os.stat(path, dir_fd=dir_fd, follow_symlinks=False).st_mode
+        )
     except FileNotFoundError:
         return False
 
@@ -742,8 +744,8 @@ class _Extractor:
                 os.chown(path, -1, self.gid, dir_fd=dir_fd, follow_symlinks=False)  # type: ignore
         elif member.islnk():
             target = _parts(member.linkname)
-            if target == parts and _isreg(parent, parts[-1]):
-                return  # tar archives a file listed twice as a hardlink to itself
+            if target == parts and _exists_not_dir(parent, parts[-1]):
+                return  # tar archives an entry listed twice as a hardlink to itself
             if (
                 not target
                 or target == parts

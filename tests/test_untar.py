@@ -438,6 +438,61 @@ def test_no_overwrites(tmp_path):
         untar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "dest"))
 
 
+LISTED_ONCE = [
+    ("dir", "d", None, 0o755),
+    ("dir/file", "f", b"x", 0o644),
+    ("dir/symlink", "s", "file", 0o777),
+    ("dir/dirlink", "s", ".", 0o777),
+]
+
+
+@needs_symlinks
+def test_listed_twice(tmp_path):
+    """tar archives an entry listed twice as a hardlink to itself, symlinks included."""
+    again = [(name, "h", name, mode) for name, kind, _, mode in LISTED_ONCE[1:]]
+    data = make_tar(LISTED_ONCE + LISTED_ONCE[:1] + again)
+    untar.extract(io.BytesIO(data), str(tmp_path / "actual"))
+    tarfile_extract(make_tar(LISTED_ONCE), tmp_path / "expected")
+    assert snapshot(tmp_path / "actual") == snapshot(tmp_path / "expected")
+
+
+@needs_symlinks
+@pytest.mark.skipif(shutil.which("tar") is None, reason="needs tar")
+@pytest.mark.parametrize("format", ["gnu", "posix"])
+def test_listed_twice_by_tar(tmp_path, format):
+    """Like GNU tar's link04 test: tar cf archive dir dir"""
+    src = tmp_path / "src"
+    for name, kind, payload, _ in LISTED_ONCE:
+        if kind == "d":
+            (src / name).mkdir(parents=True)
+        elif kind == "f":
+            (src / name).write_bytes(payload)
+        else:
+            (src / name).symlink_to(payload)
+    archive = tmp_path / "a.tar"
+    subprocess.run(
+        [
+            "tar",
+            f"--format={format}",
+            "-cf",
+            str(archive),
+            "-C",
+            str(src),
+            "dir",
+            "dir",
+        ],
+        check=True,
+    )
+    untar.extract(str(archive), str(tmp_path / "actual"))
+    assert snapshot(tmp_path / "actual") == snapshot(src)
+
+
+def test_dir_hardlinked_to_itself(tmp_path):
+    members = [("dir", "d", None, 0o755), ("dir", "h", "dir", 0o755)]
+    with pytest.raises(untar.Error, match="non-directory dir"):
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path))
+
+
 @pytest.mark.parametrize("linkname", ["/etc/passwd", "../outside"])
 def test_unsafe_hardlinks(tmp_path, linkname):
     with pytest.raises(untar.Error, match="unsafe path"):
