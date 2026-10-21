@@ -50,7 +50,8 @@ files, dirs, symlinks and hardlinks are extracted.
   the last member.
 - No path length limits: entries are created relative to open dir file descriptors, or on
   Windows by extended-length paths, so archives extract even where a member's full path would
-  exceed the operating system's limit.
+  exceed the operating system's limit. Members can be up to 1024 dirs deep, since on macOS,
+  creating an entry takes time linear in its depth.
 
 ## Decompressing in a thread
 
