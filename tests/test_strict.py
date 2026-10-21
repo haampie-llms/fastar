@@ -189,6 +189,15 @@ def test_checksum_variants(format):
         b"9path=x\n",
         b"30 path=x\n",
         b"0 path=x\n",
+        # Leading zeros: some readers find the end of a record from the length as written
+        b"011 path=x\n",
+        # A NUL or blanks in a key: readers stop there, skip the key, or skip the blanks
+        record("a\0b", "c") + record("size", "0"),
+        record(" size", "0"),
+        record("\tpath", "x"),
+        # Records that do not fill the header: readers stop at a NUL, or skip the record
+        record("path", "x") + b"\0",
+        record("path", "x") + b"\0" + record("path", "y"),
     ],
 )
 def test_invalid_pax_records(tmp_path, records):
