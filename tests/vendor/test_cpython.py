@@ -109,12 +109,13 @@ def snapshot(root):
 sha256_regtype = "e09e4bc8b3c9d9177e77256353b36c159f5f040531bbd4b024a8f9b9196c71ce"
 sha256_sparse = "4f05a776071146756345ceee937b33fc5644f5a96b9780d1c7d6a32cdf164d7b"
 
-#: untar extracts only regular files, dirs and links, and rejects sparse files
+#: untar extracts only regular files, dirs and links, and rejects sparse and contiguous files
 UNSUPPORTED = (
     tarfile.CHRTYPE,
     tarfile.BLKTYPE,
     tarfile.FIFOTYPE,
     tarfile.GNUTYPE_SPARSE,
+    tarfile.CONTTYPE,
 )
 
 
@@ -200,7 +201,7 @@ def test_members_like_tarfile():
                 content,
             )
         )
-    assert len(actual) == len(expected) == 31
+    assert len(actual) == len(expected) == 30
     for a, e in zip(actual, expected):
         assert a == e, e[0]
 
@@ -215,7 +216,6 @@ def test_checksums():
             sums[m.name] = hashlib.sha256(b"".join(reader.chunks())).hexdigest()
     for name in [
         "ustar/regtype",
-        "ustar/conttype",
         "ustar/umlauts-\udcc4\udcd6\udcdc\udce4\udcf6\udcfc\udcdf",
         "misc/regtype-old-v7",
         "misc/regtype-hpux-signed-chksum-\udcc4\udcd6\udcdc\udce4\udcf6\udcfc\udcdf",
@@ -234,8 +234,8 @@ def test_checksums():
 
 @needs_testdata
 def test_unsupported_members():
-    """Sparse files of each kind, devices, fifos and a pax size that the size in the header
-    disagrees with are rejected, each in an archive of its own."""
+    """Sparse files of each kind, devices, fifos, contiguous files and a pax size that the size in
+    the header disagrees with are rejected, each in an archive of its own."""
     rejected = []
     for member, raw in raw_members(read_testtar()):
         if supported(member):
@@ -246,6 +246,7 @@ def test_unsupported_members():
                     raise untar.Error(f"unsupported {m.type!r}")
         rejected.append(member.name)
     assert rejected == [
+        "ustar/conttype",
         "ustar/blktype",
         "ustar/chrtype",
         "ustar/fifotype",
