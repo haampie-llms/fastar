@@ -186,8 +186,10 @@ class TarReader:
 
     def _more(self, size: int) -> None:
         """Make sure size bytes are buffered, or fewer at the end of the stream."""
-        parts = [self.buf[self.pos :]]
-        have = len(parts[0])
+        rest = self.buf[self.pos :]
+        # Not joined with an empty rest, which would copy what is read
+        parts = [rest] if rest else []
+        have = len(rest)
         while have < size:
             more = self.stream.read(max(_BUF, size - have))
             if not more:
@@ -205,6 +207,18 @@ class TarReader:
         pos = self.pos
         self.pos = pos + size
         return self.buf[pos : pos + size]
+
+    def _skip(self, size: int) -> None:
+        if self.pos + size <= len(self.buf):
+            self.pos += size
+            return
+        size -= len(self.buf) - self.pos
+        self.buf, self.pos = b"", 0
+        while size:
+            more = self.stream.read(min(size, _BUF))
+            if not more:
+                raise Error("Archive is truncated")
+            size -= len(more)
 
     def _end(self) -> None:
         """Read the rest of the stream, after the end-of-archive marker. Writers pad it with
@@ -248,18 +262,8 @@ class TarReader:
             raise Error("Archive is empty")
         padding = 0
         while True:
-            skip = self.remaining + padding
+            self._skip(self.remaining + padding)
             self.remaining = 0
-            if self.pos + skip <= len(self.buf):
-                self.pos += skip
-            else:
-                skip -= len(self.buf) - self.pos
-                self.buf, self.pos = b"", 0
-                while skip:
-                    more = self.stream.read(min(skip, _BUF))
-                    if not more:
-                        raise Error("Archive is truncated")
-                    skip -= len(more)
 
             # Extended headers apply to the next member, and may give its name in one way only,
             # so that readers that resolve conflicts differently cannot see different members.
@@ -325,17 +329,13 @@ class TarReader:
             name = long_name if long_name is not None else pax.get("path", name)
             if type == DIRTYPE:
                 name = name.rstrip("/") or name
-            member = Member(
-                name,
-                type,
-                _int(header[100:108]),
-                _decimal(pax["size"], "size")
-                if "size" in pax
-                else _int(header[124:136]),
-                long_link
-                if long_link is not None
-                else pax.get("linkpath", _str(header[157:257])),
-            )
+            if "size" in pax:
+                size = _decimal(pax["size"], "size")
+            else:
+                size = _int(header[124:136])
+            if long_link is None:
+                long_link = pax.get("linkpath", _str(header[157:257]))
+            member = Member(name, type, _int(header[100:108]), size, long_link)
 
             if type not in _NO_DATA_TYPES:
                 self.remaining = member.size
@@ -356,15 +356,12 @@ class _Prepend:
         self.head = head
         self.stream = stream
 
-    def read(self, size: int = -1) -> bytes:
+    def read(self, size: int) -> bytes:
         if not self.head:
             return self.stream.read(size)
-        if size < 0:
-            data, self.head = self.head + self.stream.read(), b""
-        else:
-            data, self.head = self.head[:size], self.head[size:]
-            if len(data) < size:
-                data += self.stream.read(size - len(data))
+        data, self.head = self.head[:size], self.head[size:]
+        if len(data) < size:
+            data += self.stream.read(size - len(data))
         return data
 
 
@@ -494,14 +491,13 @@ def _open_dir(parent: Dir, name: str) -> Dir:
     return path
 
 
-def _exists_not_dir(parent: Dir, name: str) -> bool:
+def _lstat(parent: Dir, name: str) -> Optional[os.stat_result]:
+    """Stat name in parent without following symlinks, or None if it does not exist."""
     path, dir_fd = _at(parent, name)
     try:
-        return not stat.S_ISDIR(
-            os.stat(path, dir_fd=dir_fd, follow_symlinks=False).st_mode
-        )
+        return os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
     except FileNotFoundError:
-        return False
+        return None
 
 
 def _close(d: Dir) -> None:
@@ -551,16 +547,17 @@ def _unsupported(e: OSError) -> bool:
 class _Extractor:
     """Extracts members in a single pass, each to its full archive name in a temporary dir.
 
-    Entries are created relative to open dir file descriptors, so paths are never longer than
-    a single name, and nothing is written through a symlink, even one swapped in concurrently.
-    The open dirs are a stack of the ancestors of the current member, which for the depth-first
-    order of tar archives changes little from one member to the next. Only the deepest
-    ``_MAX_OPEN_DIRS`` of them stay open, so that deep archives do not run out of file
+    Where supported, entries are created relative to open dir file descriptors, so paths are
+    never longer than a single name, and nothing is written through a symlink, even one swapped
+    in concurrently. The open dirs are a stack of the ancestors of the current member, which for
+    the depth-first order of tar archives changes little from one member to the next. Only the
+    deepest ``_MAX_OPEN_DIRS`` of them stay open, so that deep archives do not run out of file
     descriptors; closed ones are opened again from tmp when needed.
 
     The archive name of the final root is only known after the last member. Validation only
     needs ``root``, the deepest dir containing every member that is not a dir leading up to
-    it. State is bounded by the depth of the archive."""
+    it. State is bounded by the depth of the archive, apart from links that could not be
+    created."""
 
     def __init__(
         self,
@@ -586,8 +583,6 @@ class _Extractor:
         self.dirs: List[Dir] = []
 
         if isinstance(dest, int):
-            if not _DIR_FD:
-                raise ValueError("dest cannot be a file descriptor on this platform")
             # A copy, so that the caller's file descriptor stays open
             self.dest: Dir = os.dup(dest)
         else:
@@ -686,13 +681,18 @@ class _Extractor:
             try:
                 d = _open_dir(parent, name)
             except FileNotFoundError:
-                path, dir_fd = _at(parent, name)
-                os.mkdir(path, self.dir_mode, dir_fd=dir_fd)
-                d = _open_dir(parent, name)
-                self._attrs(d, self.dir_mode, self.chmod_dirs)
+                d = self._mkdir(parent, name)
             self._push(name, d)
             parent = d
         return parent
+
+    def _mkdir(self, parent: Dir, name: str) -> Dir:
+        """Create the dir name in parent, and open it."""
+        path, dir_fd = _at(parent, name)
+        os.mkdir(path, self.dir_mode, dir_fd=dir_fd)
+        d = _open_dir(parent, name)
+        self._attrs(d, self.dir_mode, self.chmod_dirs)
+        return d
 
     def _push(self, name: str, d: Dir) -> None:
         """Put an open dir on the stack, and close the one that is no longer among the deepest."""
@@ -756,24 +756,18 @@ class _Extractor:
             raise Error(
                 f"Archive contains non-directory {member.name} named like a directory"
             )
-        if member.isdir():
-            parent = self._dir(parts[:-1])
-            path, dir_fd = _at(parent, parts[-1])
-            try:
-                os.mkdir(path, self.dir_mode, dir_fd=dir_fd)
-            except FileExistsError:
-                self._dir(parts)
-                return
-            d = _open_dir(parent, parts[-1])
-            self._attrs(d, self.dir_mode, self.chmod_dirs)
-            self._push(parts[-1], d)
-            return
         parent = self._dir(parts[:-1])
         path, dir_fd = _at(parent, parts[-1])
-        if member.isreg():
+        if member.isdir():
+            try:
+                self._push(parts[-1], self._mkdir(parent, parts[-1]))
+            except FileExistsError:
+                self._dir(parts)
+        elif member.isreg():
             # Like chmod +X: only executable if the member is executable by its owner
             mode = self.file_mode if member.mode & 0o100 else self.file_mode & ~0o111
-            self._file(parent, parts[-1], mode, reader.chunks())
+            # Each write as large as what is buffered
+            self._file(parent, parts[-1], mode, reader.chunks(_BUF))
         elif member.issym():
             if not member.linkname:
                 raise Error(f"Archive contains symlink {member.name} without a target")
@@ -790,14 +784,7 @@ class _Extractor:
             if self.chown:
                 os.chown(path, -1, self.gid, dir_fd=dir_fd, follow_symlinks=False)  # type: ignore
         elif member.islnk():
-            target = _parts(member.linkname)
-            if target == parts and _exists_not_dir(parent, parts[-1]):
-                return  # tar archives an entry listed twice as a hardlink to itself
-            if (
-                not target
-                or target == parts
-                or not self._copy(target, parts, link=True)
-            ):
+            if not self._copy(_parts(member.linkname), parts, link=True):
                 raise Error(
                     f"Archive hardlinks {member.linkname}, which is not extracted"
                 )
@@ -831,11 +818,13 @@ class _Extractor:
         except (FileNotFoundError, Error):
             return False
         try:
-            path, dir_fd = _at(source_parent, source[-1])
-            try:
-                s = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
-            except FileNotFoundError:
+            s = _lstat(source_parent, source[-1])
+            if s is None:
                 return False
+            if source == dest:
+                # tar archives an entry listed twice as a hardlink to itself
+                return not stat.S_ISDIR(s.st_mode)
+            path, dir_fd = _at(source_parent, source[-1])
             if stat.S_ISDIR(s.st_mode):
                 if link:
                     raise Error(
@@ -887,12 +876,8 @@ class _Extractor:
         src = self._dir(root)
         names = os.listdir(src)
         for name in names:
-            new_path, new_dir_fd = _at(self.dest, name)
-            try:
-                os.stat(new_path, dir_fd=new_dir_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            raise Error(f"{name} exists in the destination")
+            if _lstat(self.dest, name) is not None:
+                raise Error(f"{name} exists in the destination")
         for name in names:
             path, dir_fd = _at(src, name)
             new_path, new_dir_fd = _at(self.dest, name)
@@ -910,21 +895,23 @@ def extract(
     gid: Optional[int] = None,
 ) -> str:
     """Extract the tar archive ``src``, a path or a binary file object that is read front to
-    back once, into ``dest``: a path, which is created if it does not exist and may be a symlink to a
-    dir, or the file descriptor of an open dir, which stays open. Entries already in ``dest`` are not replaced:
-    an archive with one of the same name is an error.
+    back once, into ``dest``: a path, which is created if it does not exist and may be a symlink
+    to a dir, or the file descriptor of an open dir, which stays open. Entries already in
+    ``dest`` are not replaced: an archive with one of the same name is an error.
 
     With ``root_marker``, only the contents of the parent of the shallowest member with that
     name are extracted, and the archive name of that parent is returned. Other members must be
     in it, except for the dirs leading up to it. Without, everything is extracted and ``""`` is
-    returned. No path longer than a single name is passed to the operating system, and nothing
-    is written through a symlink.
+    returned. Nothing is written through a symlink, and except on Windows, no path longer than a
+    single name is passed to the operating system.
 
     Files are created with ``file_mode``, without executable bits if the member is not
     executable by its owner, and dirs with ``dir_mode``, which must give the owner rwx; with
     ``gid``, both get that group. Timestamps and ownership in the archive are not restored.
     Members must be regular files, dirs, symlinks or hardlinks, and cannot be absolute or
     contain ``..``. Where links cannot be created, their targets are copied."""
+    if isinstance(dest, int) and not _DIR_FD:
+        raise ValueError("dest cannot be a file descriptor on this platform")
     if gid is not None and _WINDOWS:
         raise ValueError("gid is not supported on Windows")
     # Dir modes are set when dirs are created, and entries are then created in them
