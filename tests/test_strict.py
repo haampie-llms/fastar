@@ -330,12 +330,32 @@ def test_unknown_types_have_data():
     assert [name for name, _, _ in members(archive)] == ["mystery", "after"]
 
 
-def test_prefix_only_in_posix_ustar():
-    """GNU tar reads the prefix only with version 00; with another, the header is v7."""
-    posix = member("name", prefix="prefix") + EOF
-    v7 = member("name", prefix="prefix", magic=b"ustar\0\0\0") + EOF
-    assert members(posix) == [("prefix/name", "", 0)]
-    assert members(v7) == [("name", "", 0)]
+@pytest.mark.parametrize("version", [b"00", b"\0\0", b" \0", b"  ", b"01"])
+def test_prefix_in_ustar_headers(version):
+    """Readers look at the magic "ustar\\0" and not at the version, which some writers got
+    wrong: a file in a dir would be extracted in the destination's top level."""
+    archive = member("name", prefix="prefix", magic=b"ustar\0" + version) + EOF
+    assert members(archive) == [("prefix/name", "", 0)]
+
+
+@pytest.mark.parametrize("magic", [b"ustar  \0", b"ustar 00", b"ustarX00", bytes(8)])
+def test_prefix_in_other_headers(tmp_path, magic):
+    """GNU incremental archives have times there, which some readers take for a prefix,
+    as some do after any magic that starts with "ustar"."""
+    assert members(member("name", magic=magic) + EOF) == [("name", "", 0)]
+    rejects(member("name", prefix="prefix", magic=magic) + EOF, tmp_path, "not ustar")
+
+
+def test_star_prefix():
+    """star's prefix is 131 bytes, followed by times: some readers read only those, others
+    all 155."""
+    star = bytearray(header("name", prefix="p" * 131))
+    star[476:500] = b"14000000000\0" * 2
+    star[508:512] = b"tar\0"
+    with pytest.raises(untar.Error, match="star header"):
+        members(checksum(star) + EOF)
+    star[475] = 0
+    assert members(checksum(star) + EOF) == [("p" * 130 + "/name", "", 0)]
 
 
 @pytest.mark.parametrize(
