@@ -812,7 +812,7 @@ class _Extractor:
         self._track(member, parts)
         if not parts:
             return
-        if not member.isdir() and member.name.rstrip(".").endswith("/"):
+        if not member.isdir() and member.name.endswith(("/", "/.")):
             raise Error(
                 f"Archive contains non-directory {member.name} named like a directory"
             )
