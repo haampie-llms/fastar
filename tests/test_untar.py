@@ -257,6 +257,13 @@ def test_unsafe_names(tmp_path, name):
     assert os.listdir(tmp_path) == ["dest"] and os.listdir(dest) == []
 
 
+@pytest.mark.parametrize("name", ["...", "d/...", "d/....", "d/..x", "d/x.."])
+def test_names_of_dots(tmp_path, name):
+    """Only . and .. are special."""
+    untar.extract(io.BytesIO(make_tar([(name, "f", b"x", 0o644)])), str(tmp_path))
+    assert (tmp_path / name).read_bytes() == b"x"
+
+
 @needs_symlinks
 @pytest.mark.parametrize("target", ["/tmp", "..", "sub"])
 def test_no_writes_through_symlinks(tmp_path, target):
