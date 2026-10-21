@@ -299,6 +299,86 @@ def test_no_hardlinks_through_symlinks(tmp_path):
     assert (outside / "secret").stat().st_nlink == 1
 
 
+#: An entry of each kind: a file, a dir, a symlink, and a hardlink to a member named target
+PAYLOADS = {"f": b"x", "d": None, "s": "/", "h": "target"}
+
+
+@needs_symlinks
+@pytest.mark.parametrize("kind", PAYLOADS)
+def test_no_entries_through_symlinks(tmp_path, kind):
+    """Not only files: no dir, symlink or hardlink is created through a symlink either."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    members = [
+        ("target", "f", b"x", 0o644),
+        ("link", "s", str(outside), 0o777),
+        ("link/entry", kind, PAYLOADS[kind], 0o755),
+    ]
+    with pytest.raises(untar.Error, match="not a directory"):
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "dest"))
+    assert os.listdir(outside) == []
+
+
+@needs_symlinks
+def test_no_writes_over_symlinks(tmp_path):
+    """A file after a symlink of the same name does not write through it."""
+    outside = tmp_path / "outside"
+    outside.write_text("original")
+    members = [("f", "s", str(outside), 0o777), ("f", "f", b"overwritten", 0o644)]
+    with pytest.raises(FileExistsError):
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "dest"))
+    assert outside.read_text() == "original"
+
+
+@needs_symlinks
+def test_symlink_in_dest(tmp_path):
+    """A symlink already in dest is not followed by members of that name."""
+    (tmp_path / "outside").mkdir()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "lib").symlink_to(tmp_path / "outside")
+    members = [("lib", "d", None, 0o755), ("lib/owned", "f", b"x", 0o644)]
+    with pytest.raises(untar.Error, match="exists in the destination"):
+        untar.extract(io.BytesIO(make_tar(members)), str(dest))
+    assert os.listdir(tmp_path / "outside") == []
+
+
+def folds(path, a: str, b: str) -> bool:
+    """Whether the filesystem of path treats names a and b as the same."""
+    (path / a).write_text("")
+    try:
+        return (path / b).exists()
+    finally:
+        (path / a).unlink()
+
+
+@needs_symlinks
+@pytest.mark.parametrize(
+    "link,name",
+    [("A", "a"), ("\u00e9", "e\u0301"), ("\u017f", "s"), ("\u212a", "k")],
+    ids=["case", "normalization", "long s", "kelvin"],
+)
+@pytest.mark.parametrize("kind", ["f", "d", "s", "h", "target"])
+def test_names_that_fold(tmp_path, link, name, kind):
+    """On filesystems that ignore case or normalize Unicode, like those of macOS and
+    Windows, another name may lead through a symlink. Neither entries below it nor
+    hardlink targets go through it."""
+    if not folds(tmp_path, link, name):
+        pytest.skip(f"the filesystem tells {link!r} and {name!r} apart")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_text("secret")
+    members = [("target", "f", b"x", 0o644), (link, "s", str(outside), 0o777)]
+    if kind == "target":
+        members.append(("hard", "h", f"{name}/secret", 0o644))
+    else:
+        members.append((f"{name}/entry", kind, PAYLOADS[kind], 0o755))
+    with pytest.raises(untar.Error, match="not a directory|not extracted"):
+        untar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "dest"))
+    assert os.listdir(outside) == ["secret"]
+    assert (outside / "secret").stat().st_nlink == 1
+
+
 class FdCounter:
     """Tracks the file descriptors that os.open opens and os.close closes."""
 
