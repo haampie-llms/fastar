@@ -418,6 +418,22 @@ def test_deep_tmp_is_removed_in_linear_time(tmp_path, monkeypatch):
     assert fds.opens < 2 * depth + 10
 
 
+def test_depth_is_limited(tmp_path, monkeypatch):
+    """On macOS, creating an entry takes time linear in its depth: a tiny compressed archive
+    of a single deep path would take hours."""
+    monkeypatch.setattr(untar, "_MAX_DEPTH", 8)
+    deepest = "/".join("abcdefgh")
+    members = [(deepest, "f", b"x", 0o644), ("h", "h", deepest, 0o644)]
+    untar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "ok"))
+    for members in [
+        [(deepest + "/i", "f", b"x", 0o644)],
+        [("f", "f", b"x", 0o644), ("h", "h", "./" + deepest + "/i", 0o644)],
+    ]:
+        with pytest.raises(untar.Error, match="more than 8 levels deep"):
+            untar.extract(io.BytesIO(make_tar(members)), str(tmp_path / "deep"))
+        assert os.listdir(tmp_path / "deep") == []
+
+
 @pytest.mark.skipif(not untar._DIR_FD, reason="needs dir file descriptors")
 def test_dest_dir_fd(tmp_path):
     """dest can be an open dir, which is extracted into wherever it moved, and stays open."""

@@ -51,6 +51,8 @@ _BUF = 1024 * 1024
 _MAX_EXTENDED = 1024 * 1024
 #: Dirs on the stack that stay open: the deepest ones, and shallower ones are reopened if needed
 _MAX_OPEN_DIRS = 64
+#: Path components per member: on macOS, creating an entry takes time linear in its depth
+_MAX_DEPTH = 1024
 _BadGzipFile = getattr(gzip, "BadGzipFile", OSError)
 
 
@@ -417,6 +419,8 @@ def _parts(name: str) -> List[str]:
         and any("\\" in p or ":" in p for p in parts)
     ):
         raise Error(f"Archive contains unsafe path {name}")
+    if len(parts) > _MAX_DEPTH:
+        raise Error(f"Archive contains a path more than {_MAX_DEPTH} levels deep")
     return parts
 
 
@@ -918,8 +922,9 @@ def extract(
     Files are created with ``file_mode``, without executable bits if the member is not
     executable by its owner, and dirs with ``dir_mode``, which must give the owner rwx; with
     ``gid``, both get that group. Timestamps and ownership in the archive are not restored.
-    Members must be regular files, dirs, symlinks or hardlinks, and cannot be absolute or
-    contain ``..``. Where links cannot be created, their targets are copied."""
+    Members must be regular files, dirs, symlinks or hardlinks, and cannot be absolute,
+    contain ``..`` or be more than 1024 dirs deep. Where links cannot be created, their
+    targets are copied."""
     if isinstance(dest, int) and not _DIR_FD:
         raise ValueError("dest cannot be a file descriptor on this platform")
     if gid is not None and _WINDOWS:
