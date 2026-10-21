@@ -105,6 +105,17 @@ def _int(field: bytes) -> int:
     return int(digits, 8) if digits else 0
 
 
+def _long_name(data: bytes) -> str:
+    """A GNU long name or link, which ends with NULs. Readers disagree on a NUL inside it: some
+    stop there, others keep the rest."""
+    name = data.rstrip(b"\0")
+    if not name:
+        raise Error("Archive contains an empty GNU long name")
+    if b"\0" in name:
+        raise Error(f"Archive contains a GNU long name with a NUL inside {name!r}")
+    return name.decode("utf-8", "surrogateescape")
+
+
 def _decimal(value: str, key: str) -> int:
     """A pax decimal number, of ASCII digits only."""
     if not value or value.strip("0123456789"):
@@ -287,11 +298,9 @@ class TarReader:
                 if kind == _PAX_HEADER:
                     pax = _pax_records(data)
                 elif kind == _GNU_LONGNAME:
-                    long_name = _str(data)
+                    long_name = _long_name(data)
                 else:
-                    long_link = _str(data)
-                if kind != _PAX_HEADER and not _str(data):
-                    raise Error("Archive contains an empty GNU long name")
+                    long_link = _long_name(data)
             if long_name is not None and "path" in pax:
                 raise Error("Archive contains both a pax path and a GNU long name")
             if long_link is not None and "linkpath" in pax:
@@ -328,7 +337,14 @@ class TarReader:
                 else pax.get("linkpath", _str(header[157:257])),
             )
 
-            self.remaining = 0 if type in _NO_DATA_TYPES else member.size
+            if type not in _NO_DATA_TYPES:
+                self.remaining = member.size
+            elif member.size and type != DIRTYPE:
+                # Readers disagree on whether data follows. Some tar implementations give dirs
+                # a size, which tar and tarfile ignore, so only those are read like tar.
+                raise Error(
+                    f"Archive contains {name} of type {type!r} with size {member.size}"
+                )
             padding = -self.remaining % _BLOCK
             yield member
 
